@@ -1,0 +1,65 @@
+services:
+  windowkeeper:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: ${WINDOWKEEPER_CODEX_PACKAGE_VERSION:?Set the validated Codex npm package version}
+    image: codex-windowkeeper:${WINDOWKEEPER_IMAGE_TAG:-local}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "${WINDOWKEEPER_BIND_ADDRESS:-127.0.0.1}:${WINDOWKEEPER_PORT:-8787}:8787"
+    environment:
+      WINDOWKEEPER_PUBLIC_BASE_URL: ${WINDOWKEEPER_PUBLIC_BASE_URL:-}
+      WINDOWKEEPER_ROOT_PATH: ${WINDOWKEEPER_ROOT_PATH:-}
+      WINDOWKEEPER_COOKIE_SECURE: ${WINDOWKEEPER_COOKIE_SECURE:-auto}
+      WINDOWKEEPER_BROWSER_OAUTH_MODE: ${WINDOWKEEPER_BROWSER_OAUTH_MODE:-manual}
+      WINDOWKEEPER_CODEX_VERSION: ${WINDOWKEEPER_CODEX_VERSION:?Set exact `codex --version` output}
+      WINDOWKEEPER_CODEX_SHA256: ${WINDOWKEEPER_CODEX_SHA256:?Set the validated Codex executable SHA-256}
+      WINDOWKEEPER_VAULT_KEY_FILE: /run/secrets/windowkeeper_vault_key
+      WINDOWKEEPER_ADMIN_PASSWORD_FILE: /run/secrets/windowkeeper_admin_password
+    volumes:
+      - windowkeeper-data:/data
+    tmpfs:
+      - /run/windowkeeper:uid=10001,gid=10001,mode=0700,size=512m
+      - /tmp:uid=10001,gid=10001,mode=0700,size=128m
+    secrets:
+      - source: windowkeeper_vault_key
+        target: windowkeeper_vault_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: windowkeeper_admin_password
+        target: windowkeeper_admin_password
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    healthcheck:
+      test:
+        [
+          CMD,
+          python,
+          -c,
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health/ready', timeout=2)",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+
+volumes:
+  windowkeeper-data: {}
+
+secrets:
+  windowkeeper_vault_key:
+    file: ${WINDOWKEEPER_VAULT_KEY_FILE:?Set a protected vault key file}
+  windowkeeper_admin_password:
+    file: ${WINDOWKEEPER_ADMIN_PASSWORD_FILE:?Set a protected admin password file}
