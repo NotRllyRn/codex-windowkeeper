@@ -20,24 +20,13 @@ services:
       WINDOWKEEPER_BROWSER_OAUTH_MODE: host-loopback
       WINDOWKEEPER_CODEX_VERSION: ${WINDOWKEEPER_CODEX_VERSION:?Set exact `codex --version` output}
       WINDOWKEEPER_CODEX_SHA256: ${WINDOWKEEPER_CODEX_SHA256:?Set the validated Codex executable SHA-256}
-      WINDOWKEEPER_VAULT_KEY_FILE: /run/secrets/windowkeeper_vault_key
-      WINDOWKEEPER_ADMIN_PASSWORD_FILE: /run/secrets/windowkeeper_admin_password
+      WINDOWKEEPER_VAULT_KEY: ${WINDOWKEEPER_VAULT_KEY:?Set WINDOWKEEPER_VAULT_KEY in .env}
+      WINDOWKEEPER_ADMIN_PASSWORD: ${WINDOWKEEPER_ADMIN_PASSWORD:?Set WINDOWKEEPER_ADMIN_PASSWORD in .env}
     volumes:
       - windowkeeper-data:/data
     tmpfs:
       - /run/windowkeeper:uid=10001,gid=10001,mode=0700,size=512m
       - /tmp:uid=10001,gid=10001,mode=0700,size=128m
-    secrets:
-      - source: windowkeeper_vault_key
-        target: windowkeeper_vault_key
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
-      - source: windowkeeper_admin_password
-        target: windowkeeper_admin_password
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
     healthcheck:
       test:
         [
@@ -53,9 +42,3 @@ services:
 
 volumes:
   windowkeeper-data: {}
-
-secrets:
-  windowkeeper_vault_key:
-    file: ${WINDOWKEEPER_VAULT_KEY_FILE:?Set a protected vault key file}
-  windowkeeper_admin_password:
-    file: ${WINDOWKEEPER_ADMIN_PASSWORD_FILE:?Set a protected admin password file}

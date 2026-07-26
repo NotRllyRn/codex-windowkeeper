@@ -16,6 +16,9 @@ def test_cli_initialization_vault_verification_and_version(tmp_path: Path) -> No
         "WINDOWKEEPER_RUNTIME_DIR": str(tmp_path / "run"),
     }
     runner = CliRunner()
+    generated = runner.invoke(cli, ["vault", "generate-key"], env=environment)
+    assert generated.exit_code == 0, generated.output
+    assert generated.output.strip().startswith("wk1_")
     initialized = runner.invoke(
         cli,
         ["init", "--key-file", str(key_file)],

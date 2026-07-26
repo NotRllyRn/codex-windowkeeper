@@ -394,9 +394,12 @@ def vault() -> None:
 
 
 @vault.command("generate-key")
-@click.option("--output", required=True, type=click.Path(path_type=Path))
-def vault_generate_key(output: Path) -> None:
-    """Write a new vault key to a protected file."""
+@click.option("--output", type=click.Path(path_type=Path))
+def vault_generate_key(output: Path | None) -> None:
+    """Print a new vault key, or write it to a protected file."""
+    if output is None:
+        click.echo(generate_key())
+        return
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(
         output,

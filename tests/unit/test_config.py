@@ -11,6 +11,18 @@ from windowkeeper.web.app import _read_secret, create_app
 PASSWORD = "correct horse battery staple"  # noqa: S105
 
 
+def test_dotenv_secrets_are_loaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    key = generate_key()
+    (tmp_path / ".env").write_text(
+        f'WINDOWKEEPER_ADMIN_PASSWORD="{PASSWORD}"\nWINDOWKEEPER_VAULT_KEY={key}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(data_dir=tmp_path / "data", runtime_dir=tmp_path / "run")
+    assert settings.admin_password == PASSWORD
+    assert settings.vault_key == key
+
+
 def test_secret_file_precedes_environment_value_and_requires_private_mode(tmp_path: Path) -> None:
     source = tmp_path / "secret"
     source.write_text("from-file", encoding="utf-8")

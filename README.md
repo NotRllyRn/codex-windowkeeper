@@ -24,28 +24,30 @@ uv run mypy src tests
 uv run pytest
 ```
 
-Initialize protected key/password files without putting secrets in shell history:
+Create a private repository-local `.env` file—no shell exports required:
 
 ```bash
-windowkeeper init --key-file /secure/windowkeeper.key
-# or set WINDOWKEEPER_ADMIN_PASSWORD_FILE to a mode-0600 file
+cp .env.example .env
+chmod 600 .env
+uv run windowkeeper vault generate-key  # paste the result into WINDOWKEEPER_VAULT_KEY
+# set WINDOWKEEPER_ADMIN_PASSWORD in .env, then:
+uv run windowkeeper serve
 ```
+
+Windowkeeper loads `.env` automatically. The file is ignored by Git and excluded from Docker build contexts; never commit it.
 
 A service is ready only when the vault is configured and the observed Codex `--version` output and executable SHA-256 exactly equal `WINDOWKEEPER_CODEX_VERSION` and `WINDOWKEEPER_CODEX_SHA256`.
 
 ## Hardened Docker Compose
 
-1. Pin the validated Codex npm package release, observed version output, and executable digest.
-2. Create files containing a generated `wk1_...` vault key and a 15+ character administrator password. Generate the key with `windowkeeper vault generate-key --output /secure/windowkeeper.key`. For local Docker Compose implementations that preserve source-file ownership, make both files mode `0600` and readable by container UID/GID `10001:10001`.
-3. Bind to loopback or a trusted LAN interface only.
+1. Run `cp .env.example .env && chmod 600 .env`.
+2. Fill in the administrator password, generated vault key, and validated Codex compatibility tuple.
+3. Run `docker compose up --build -d`. Compose reads `.env` automatically.
 
 ```bash
-export WINDOWKEEPER_CODEX_PACKAGE_VERSION='<validated npm version>'
-export WINDOWKEEPER_CODEX_VERSION='<exact codex --version output>'
-export WINDOWKEEPER_CODEX_SHA256='<sha256 of /usr/local/bin/codex in the image>'
-export WINDOWKEEPER_VAULT_KEY_FILE="$PWD/secrets/vault.key"
-export WINDOWKEEPER_ADMIN_PASSWORD_FILE="$PWD/secrets/admin-password"
-export WINDOWKEEPER_BIND_ADDRESS=127.0.0.1
+cp .env.example .env
+chmod 600 .env
+uv run windowkeeper vault generate-key  # paste into .env
 docker compose up --build -d
 ```
 

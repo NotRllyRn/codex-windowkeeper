@@ -6,12 +6,13 @@ Windowkeeper requires Python 3.12+, a dedicated service account, SQLite storage 
 
 ```bash
 uv sync --locked
-windowkeeper init --key-file /secure/windowkeeper-vault.key
+cp .env.example .env && chmod 600 .env
+windowkeeper vault generate-key  # paste into WINDOWKEEPER_VAULT_KEY in .env
 windowkeeper doctor
 windowkeeper serve
 ```
 
-`init` writes the key with mode `0600`, creates the vault sentinel, and prompts twice for the first administrator password. The key must remain outside the persistent data directory. For Docker Compose, both secret source files must be readable by container UID/GID `10001:10001`; some local Compose implementations do not apply the declared secret ownership to file-backed secrets. A service is not ready until `doctor` confirms the exact configured Codex version and executable SHA-256.
+Set a 15+ character `WINDOWKEEPER_ADMIN_PASSWORD` in `.env`. Windowkeeper loads the file automatically, creates the vault sentinel on first start, and never stores the vault key in SQLite. `.env` is ignored by Git and Docker builds, but it is still plaintext: keep mode `0600`, do not share it, and restrict access to the repository directory. A service is not ready until `doctor` confirms the exact configured Codex version and executable SHA-256.
 
 ## Account sign-in
 
@@ -75,4 +76,4 @@ Never downgrade a database to a release that does not support its schema.
 
 ## Security boundary
 
-Windowkeeper protects credentials at rest, isolates runtime credential trees, redacts known secret-bearing values, and fails closed on compatibility drift. It cannot protect against root, a compromised host, or a malicious binary that already matches the operator-configured digest. The validated Codex child process necessarily receives plaintext credentials while its isolated runtime is active.
+Windowkeeper protects credentials at rest, isolates runtime credential trees, redacts known secret-bearing values, and fails closed on compatibility drift. Secrets supplied through `.env` are visible to the Windowkeeper process and may be visible to users allowed to inspect its environment or Docker container; use file-backed secrets instead when that distinction matters. Windowkeeper cannot protect against root, a compromised host, or a malicious binary that already matches the operator-configured digest. The validated Codex child process necessarily receives plaintext credentials while its isolated runtime is active.
