@@ -167,6 +167,9 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Windowkeeper local state
+.windowkeeper/
+
 # mypy
 .mypy_cache/
 .dmypy.json
