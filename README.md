@@ -4,7 +4,8 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 
 ## What ships
 
-- Isolated runtime and encrypted credential lineage per account.
+- Isolated runtime and encrypted managed credential lineage per account.
+- Two-grant enrollment: one managed credential plus one separately authorized, downloadable `auth.json` that Windowkeeper never uses or refreshes.
 - Device-code sign-in (recommended) and managed browser OAuth with strict callback validation.
 - Confirmed, estimated, and unknown scheduling states; manual activation uses the same deduplication path.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
@@ -78,9 +79,9 @@ windowkeeper password-set
 windowkeeper vault verify --key-file /secure/current.key
 ```
 
-Vault rotation is offline, all-or-nothing, and re-encrypts active credentials plus webhook URLs/signing secrets before writing the new key file. Replace the configured key file atomically only after the command succeeds.
+Vault rotation is offline, all-or-nothing, and re-encrypts managed credentials, unmanaged auth exports, and webhook URLs/signing secrets before writing the new key file. Replace the configured key file atomically only after the command succeeds.
 
-The dashboard provides account enable/disable, reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Destructive or secret-changing actions require CSRF and recent administrator password verification.
+The dashboard provides password-reauthenticated `auth.json` export, account enable/disable, managed reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Destructive or secret-changing actions require CSRF and recent administrator password verification.
 
 ## Security boundary
 

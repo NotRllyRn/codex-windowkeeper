@@ -22,9 +22,12 @@ def test_capture_and_materialize_reject_unsafe_paths(tmp_path: Path) -> None:
     (source / "auth.json").write_text('{"token":"secret"}', encoding="utf-8")
     vault = Vault(decode_key(generate_key()), "instance")
     payload = vault.capture(source, "test")
+    assert vault.auth_json(payload) == b'{"token":"secret"}'
     destination = tmp_path / "destination"
     vault.materialize(payload, destination)
     assert (destination / "auth.json").read_text() == '{"token":"secret"}'
     payload["files"][0]["relative_path"] = "../auth.json"
+    with pytest.raises(ValueError):
+        vault.auth_json(payload)
     with pytest.raises(ValueError):
         vault.materialize(payload, tmp_path / "bad")

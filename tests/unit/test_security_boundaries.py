@@ -6,7 +6,12 @@ import pytest
 
 from windowkeeper.errors import WindowkeeperError
 from windowkeeper.redaction import redact, sanitize_url
-from windowkeeper.services import ApplicationServices, browser_contract, validate_callback
+from windowkeeper.services import (
+    ApplicationServices,
+    browser_contract,
+    validate_callback,
+    verify_same_identity,
+)
 
 
 def test_browser_callback_contract_and_state() -> None:
@@ -39,6 +44,22 @@ async def test_activation_rejects_any_tool_item() -> None:
     with pytest.raises(WindowkeeperError) as caught:
         await services._await_turn(notifications(), "turn-1")
     assert caught.value.code == "ACTIVATION_SAFETY_VIOLATION"
+
+
+def test_export_login_must_match_the_managed_identity() -> None:
+    managed = {"account": {"email": "Owner@Example.test", "workspaceId": "workspace-1"}}
+    verify_same_identity(
+        managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-1"}}
+    )
+    with pytest.raises(WindowkeeperError) as caught:
+        verify_same_identity(
+            managed, {"account": {"email": "other@example.test", "workspaceId": "workspace-1"}}
+        )
+    assert caught.value.code == "AUTH_EXPORT_IDENTITY_MISMATCH"
+    with pytest.raises(WindowkeeperError):
+        verify_same_identity(
+            managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-2"}}
+        )
 
 
 def test_redaction_is_recursive_and_sanitizes_urls() -> None:

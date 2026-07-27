@@ -38,15 +38,35 @@ for line in sys.stdin:
     elif method == "account/login/start":
         try:
             home.mkdir(parents=True, exist_ok=True)
-            (home / "auth.json").write_text('{"access_token":"fixture"}', encoding="utf-8")
+            trace = home.parents[1] / ".fake-logins"
+            login_number = (
+                len(trace.read_text(encoding="utf-8").splitlines()) + 1 if trace.exists() else 1
+            )
+            with trace.open("a", encoding="utf-8") as stream:
+                stream.write(f"login-{login_number}\n")
+            (home / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "auth_mode": "chatgpt",
+                        "tokens": {
+                            "id_token": f"id-{login_number}",
+                            "access_token": f"access-{login_number}",
+                            "refresh_token": f"refresh-{login_number}",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
         except OSError:
             send({"id": request_id, "error": {"code": "credential_write_failed"}})
             continue
+        login_id = f"login-{login_number}"
         send(
             {
                 "id": request_id,
                 "result": {
-                    "loginId": "login-1",
+                    "loginId": login_id,
                     "verificationUrl": "https://auth.openai.test/device",
                     "userCode": "ABCD-EFGH",
                     "expiresAt": int(time.time() * 1000) + 60000,
@@ -54,7 +74,7 @@ for line in sys.stdin:
             }
         )
         send(
-            {"method": "account/login/completed", "params": {"loginId": "login-1", "success": True}}
+            {"method": "account/login/completed", "params": {"loginId": login_id, "success": True}}
         )
     elif method == "account/login/cancel":
         send({"id": request_id, "result": {}})
@@ -75,6 +95,12 @@ for line in sys.stdin:
         if marker(".auth-error"):
             send({"id": request_id, "error": {"code": "unauthorized"}})
             continue
+        if marker(".refresh-token"):
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            auth["tokens"]["refresh_token"] += "-rotated"
+            (home / "auth.json").write_text(
+                json.dumps(auth, separators=(",", ":")), encoding="utf-8"
+            )
         send(
             {
                 "id": request_id,
@@ -101,6 +127,12 @@ for line in sys.stdin:
             }
         )
     elif method == "thread/start":
+        expected_path = Path(__file__).with_suffix(".expect-token")
+        if expected_path.exists():
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            if auth["tokens"]["refresh_token"] != expected_path.read_text(encoding="utf-8"):
+                send({"id": request_id, "error": {"code": "stale_refresh_token"}})
+                continue
         send({"id": request_id, "result": {"thread": {"id": "thread-1"}}})
     elif method == "turn/start":
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})

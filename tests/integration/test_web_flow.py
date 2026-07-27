@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from pathlib import Path
@@ -73,6 +74,9 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         dashboard = client.get("/api/internal/v1/dashboard").json()
         account = dashboard["data"][0]
         assert account["short_percent"] == 22
+        traces = list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
+        assert len(traces) == 1
+        assert traces[0].read_text(encoding="utf-8").splitlines() == ["login-1", "login-2"]
         for path in (
             f"/accounts/{account['public_token']}",
             "/accounts/new",
@@ -83,6 +87,48 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         exported_logs = client.get("/logs/export")
         assert exported_logs.status_code == 200
         assert exported_logs.headers["content-type"].startswith("application/x-ndjson")
+        export_path = f"/accounts/{account['public_token']}/auth-export"
+        assert (
+            client.post(
+                export_path,
+                data={"admin_password": PASSWORD, "csrf_token": "invalid"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                export_path,
+                data={"admin_password": "wrong password", "csrf_token": csrf},
+            ).status_code
+            == 401
+        )
+        auth_export = client.post(
+            export_path,
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert auth_export.status_code == 200
+        assert auth_export.headers["content-disposition"] == 'attachment; filename="auth.json"'
+        assert auth_export.headers["cache-control"] == "no-store, max-age=0"
+        assert auth_export.headers["content-type"] == "application/json"
+        assert json.loads(auth_export.content)["tokens"]["refresh_token"] == "refresh-2"  # noqa: S105
+        reauthenticated = client.post(
+            f"/accounts/{account['public_token']}/reauthenticate",
+            data={
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        assert reauthenticated.status_code == 200
+        deadline = time.monotonic() + 8
+        while len(traces[0].read_text(encoding="utf-8").splitlines()) < 3:
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+        unchanged_export = client.post(
+            export_path,
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert json.loads(unchanged_export.content)["tokens"]["refresh_token"] == "refresh-2"  # noqa: S105
         assert (
             client.post(
                 f"/accounts/{account['public_token']}/refresh",
@@ -124,6 +170,67 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             wait_for(client, "authentication must be renewed", "/incidents")
         finally:
             auth_error_marker.unlink(missing_ok=True)
+
+
+def test_managed_refresh_is_checkpointed_across_restart(tmp_path: Path) -> None:
+    executable = Path(__file__).parents[1] / "fake_codex.py"
+    refresh_marker = executable.with_suffix(".refresh-token")
+    expected_marker = executable.with_suffix(".expect-token")
+    os.chmod(executable, 0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+        activation_safety_delay_seconds=1,
+        activation_jitter_max_seconds=0,
+    )
+    try:
+        with TestClient(create_app(settings)) as client:
+            login = client.post("/login", data={"password": PASSWORD})
+            client.cookies.update(login.cookies)
+            csrf = client.cookies["wk_csrf"]
+            created = client.post(
+                "/accounts",
+                data={
+                    "display_name": "Checkpointed",
+                    "login_method": "CHATGPT_DEVICE_CODE",
+                    "admin_password": PASSWORD,
+                    "csrf_token": csrf,
+                },
+            )
+            assert created.status_code == 200
+            wait_for(client, "Checkpointed")
+            wait_for(client, "22%")
+            account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+            refresh_marker.touch()
+            refreshed = client.post(
+                f"/accounts/{account['public_token']}/refresh",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert refreshed.status_code == 303
+            wait_for(client, "Succeeded", refreshed.headers["location"])
+            refresh_marker.unlink()
+
+        expected_marker.write_text("refresh-1-rotated", encoding="utf-8")
+        with TestClient(create_app(settings)) as client:
+            login = client.post("/login", data={"password": PASSWORD})
+            client.cookies.update(login.cookies)
+            csrf = client.cookies["wk_csrf"]
+            account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+            activation = client.post(
+                f"/accounts/{account['public_token']}/activate",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert activation.status_code == 303
+            wait_for(client, "Succeeded", activation.headers["location"])
+    finally:
+        refresh_marker.unlink(missing_ok=True)
+        expected_marker.unlink(missing_ok=True)
 
 
 def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:

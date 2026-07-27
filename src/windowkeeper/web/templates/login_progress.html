@@ -4,6 +4,7 @@ endblock %} {% block content %}
   class="login-progress"
   data-login-progress
   data-attempt="{{ started.login_attempt_id }}"
+  data-account="{{ account.public_token }}"
   data-nonce="{{ started.interaction_nonce }}"
   data-csrf="{{ csrf }}"
 >
@@ -11,18 +12,26 @@ endblock %} {% block content %}
     <span>1</span>
     <p>Runtime isolated</p>
   </div>
-  <div class="progress-step current">
+  <div class="progress-step current" data-managed-step>
     <span>2</span>
-    <p>Waiting for authorization</p>
+    <p>Managed authorization</p>
   </div>
-  <div class="progress-step">
+  {% if started.requires_export_login %}
+  <div class="progress-step" data-export-step>
     <span>3</span>
+    <p>Export authorization</p>
+  </div>
+  {% endif %}
+  <div class="progress-step">
+    <span>{{ 4 if started.requires_export_login else 3 }}</span>
     <p>Verify and encrypt</p>
   </div>
   <p class="kicker">{{ account.display_name }}</p>
-  <h1>Complete ChatGPT sign-in</h1>
+  <h1 data-login-heading>Complete managed ChatGPT sign-in</h1>
   <p class="interaction-status" aria-live="polite">
-    Starting the official Codex sign-in flow.
+    {% if started.requires_export_login %}First of two separate
+    authorizations.{% else %}Starting the official Codex sign-in flow.{% endif
+    %}
   </p>
   <div class="interaction-loading" data-loading>
     <span></span><span></span><span></span>

@@ -124,6 +124,22 @@ class Vault:
             "workspace_constraint": workspace,
         }
 
+    def auth_json(self, payload: dict[str, Any]) -> bytes:
+        for item in payload.get("files", []):
+            if item.get("relative_path") != "auth.json":
+                continue
+            content = base64.b64decode(item["content_base64"], validate=True)
+            if hashlib.sha256(content).hexdigest() != item["sha256"]:
+                raise ValueError("credential payload digest mismatch")
+            try:
+                value = json.loads(content)
+            except json.JSONDecodeError as error:
+                raise ValueError("auth.json is not valid JSON") from error
+            if not isinstance(value, dict):
+                raise ValueError("auth.json must contain an object")
+            return content
+        raise ValueError("credential bundle has no auth.json")
+
     def seal_text(self, scope: str, value: str) -> bytes:
         envelope = self.encrypt(scope, {"schema_version": 1, "value": value})
         return json.dumps(

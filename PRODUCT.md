@@ -16,11 +16,11 @@ Windowkeeper monitors each account's Codex usage windows and intentionally submi
 
 ## Positioning
 
-Windowkeeper is an evidence-driven, fail-closed activation supervisor. Unlike account rotators or quota pools, it preserves one credential lineage per account and prefers skipping an ambiguous window over risking a duplicate accepted turn.
+Windowkeeper is an evidence-driven, fail-closed activation supervisor. Unlike account rotators or quota pools, it preserves one managed credential lineage per account and prefers skipping an ambiguous window over risking a duplicate accepted turn.
 
 ## Operating Context
 
-The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll accounts with ChatGPT browser OAuth or device-code OAuth, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
+The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll accounts with two same-identity ChatGPT authorizations, download the second authorization as an unmanaged `auth.json`, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
 
 ## Capabilities and Constraints
 
@@ -28,7 +28,8 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 - The Codex app-server installed and managed by Windowkeeper is the only upstream integration seam.
 - Device-code login is recommended; browser login supports automatic loopback and strict one-time manual callback forwarding.
 - SQLite is the durable store; one process owns one data directory.
-- Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories.
+- Each new account has one managed credential bundle and one separately authorized unmanaged auth export.
+- Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.
 - One accepted activation at most for each account and window key; ambiguous submission blocks replay.
 - FastAPI, Jinja, native JavaScript, native SSE, Click, and no Node build or client router.
 - Dashboard view models remain independent from layout experiments.

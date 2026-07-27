@@ -22,7 +22,9 @@ Device code is recommended for local, NAS, Docker, and SSH deployments. Browser 
 - `host-loopback`: receive the validated localhost callback directly; only use on a Linux host where Windowkeeper owns the pinned callback ports.
 - `disabled`: prohibit browser OAuth while retaining device-code sign-in.
 
-Windowkeeper validates HTTPS, callback host/path/port, OAuth state, response size, and account/workspace identity before promoting credentials. Failed replacement credentials never replace the active bundle.
+New-account enrollment requires two separate approvals for the same ChatGPT identity. The first credential is managed by Windowkeeper; the second is retained encrypted and downloadable as `auth.json`, but is never used or refreshed by Windowkeeper. Reauthentication replaces only the managed credential.
+
+Windowkeeper validates HTTPS, callback host/path/port, OAuth state, response size, and account/workspace identity before promoting credentials. Failed enrollment credentials are not promoted, and failed replacement credentials never replace the active bundle.
 
 ## Back up and restore
 
@@ -46,7 +48,7 @@ windowkeeper vault rotate \
 windowkeeper vault verify --key-file /secure/windowkeeper-vault.next
 ```
 
-Rotation is offline and transactional. It re-encrypts active credentials, webhook URLs, webhook signing secrets, and the sentinel. Replace the configured key-file reference only after verification. Keep the old key in protected recovery storage until the new service has passed readiness and account refresh checks.
+Rotation is offline and transactional. It re-encrypts managed credentials, unmanaged auth exports, webhook URLs, webhook signing secrets, and the sentinel. Replace the configured key-file reference only after verification. Keep the old key in protected recovery storage until the new service has passed readiness and account refresh checks.
 
 ## Reverse proxy
 

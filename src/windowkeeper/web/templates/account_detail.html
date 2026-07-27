@@ -12,8 +12,29 @@ Windowkeeper{% endblock %} {% block content %}
 </section>
 {% if detail.account.activation_state in ['AMBIGUOUS', 'SAFETY_BLOCKED'] %}
 <section class="danger-zone">
-  <h2>{{ 'Safety block' if detail.account.activation_state == 'SAFETY_BLOCKED' else 'Ambiguous activation' }} requires review</h2><p>Windowkeeper will never resend this window. After checking upstream evidence, acknowledge the block to allow future windows to be scheduled.</p>
-  <form method="post" action="/accounts/{{ detail.account.public_token }}/ambiguity/acknowledge" data-confirm="Acknowledge this ambiguous activation without retrying it?"><input type="hidden" name="csrf_token" value="{{ csrf }}" /><label>Administrator password<input name="admin_password" type="password" required autocomplete="current-password" /></label><button class="danger-button" type="submit">Acknowledge without retry</button></form>
+  <h2>
+    {{ 'Safety block' if detail.account.activation_state == 'SAFETY_BLOCKED'
+    else 'Ambiguous activation' }} requires review
+  </h2>
+  <p>
+    Windowkeeper will never resend this window. After checking upstream
+    evidence, acknowledge the block to allow future windows to be scheduled.
+  </p>
+  <form
+    method="post"
+    action="/accounts/{{ detail.account.public_token }}/ambiguity/acknowledge"
+    data-confirm="Acknowledge this ambiguous activation without retrying it?"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf }}" /><label
+      >Administrator password<input
+        name="admin_password"
+        type="password"
+        required
+        autocomplete="current-password" /></label
+    ><button class="danger-button" type="submit">
+      Acknowledge without retry
+    </button>
+  </form>
 </section>
 {% endif %}
 <section class="account-evidence-grid">
@@ -64,6 +85,36 @@ Windowkeeper{% endblock %} {% block content %}
     <p>Reset: {{ detail.usage.weekly_resets_at_s or 'unknown' }}</p>
   </article>
 </section>
+<section class="detail-section reauth-panel">
+  <h2>Unmanaged auth export</h2>
+  {% if detail.auth_export.available %}
+  <p class="subtle">
+    This separately authorized <code>auth.json</code> is not used or refreshed
+    by Windowkeeper. Its tokens share this account's upstream quota and may not
+    have independent revocation semantics.
+  </p>
+  <form
+    class="account-form"
+    method="post"
+    action="/accounts/{{ detail.account.public_token }}/auth-export"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf }}" />
+    <label for="export_password">Confirm administrator password</label
+    ><input
+      id="export_password"
+      name="admin_password"
+      type="password"
+      required
+      autocomplete="current-password"
+    /><button class="primary-button" type="submit">Download auth.json</button>
+  </form>
+  {% else %}
+  <p class="subtle">
+    No unmanaged export is available. New-account enrollment creates one after
+    its second ChatGPT authorization.
+  </p>
+  {% endif %}
+</section>
 <section class="action-row">
   <form
     method="post"
@@ -103,8 +154,20 @@ Windowkeeper{% endblock %} {% block content %}
 </section>
 <section class="detail-section">
   <h2>Labels</h2>
-  <form class="account-form" method="post" action="/accounts/{{ detail.account.public_token }}/labels">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}" /><label for="account_labels">Comma-separated labels</label><input id="account_labels" name="labels" value="{{ detail.account.labels|join(', ') }}" maxlength="820" /><button class="quiet-button" type="submit">Save labels</button>
+  <form
+    class="account-form"
+    method="post"
+    action="/accounts/{{ detail.account.public_token }}/labels"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf }}" /><label
+      for="account_labels"
+      >Comma-separated labels</label
+    ><input
+      id="account_labels"
+      name="labels"
+      value="{{ detail.account.labels|join(', ') }}"
+      maxlength="820"
+    /><button class="quiet-button" type="submit">Save labels</button>
   </form>
 </section>
 <section class="detail-section reauth-panel">

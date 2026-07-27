@@ -325,7 +325,10 @@ def restore(input_file: Path, confirm: str) -> None:
     """Replace offline state from an integrity-checked backup."""
     if confirm != "RESTORE":
         raise click.ClickException("confirmation must be exactly RESTORE")
-    metadata = input_file.lstat()
+    try:
+        metadata = input_file.lstat()
+    except OSError as error:
+        raise click.ClickException("backup could not be inspected") from error
     if input_file.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
         raise click.ClickException("backup must be a protected regular file")
     with closing(
@@ -334,7 +337,10 @@ def restore(input_file: Path, confirm: str) -> None:
         if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise click.ClickException("backup integrity check failed")
         version = source.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]
-        if version != 1:
+        latest = len(
+            tuple((Path(__file__).parents[1] / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
+        )
+        if version != latest:
             raise click.ClickException("backup schema is not supported by this release")
     settings = _settings()
     destination = settings.data_dir / "windowkeeper.db"
@@ -435,7 +441,7 @@ def vault_verify(key_file: Path) -> None:
 @click.option("--old-key-file", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--new-key-file", required=True, type=click.Path(path_type=Path))
 def vault_rotate(old_key_file: Path, new_key_file: Path) -> None:
-    """Re-encrypt all active credential bundles under a newly generated key."""
+    """Re-encrypt all retained credential bundles under a newly generated key."""
     if new_key_file.exists():
         raise click.ClickException("new key file already exists")
     settings = _settings()
@@ -484,7 +490,7 @@ def vault_rotate(old_key_file: Path, new_key_file: Path) -> None:
 
             def work(connection: sqlite3.Connection) -> int:
                 rows = connection.execute(
-                    "SELECT * FROM credential_bundles WHERE state='ACTIVE'"
+                    "SELECT * FROM credential_bundles WHERE state IN('ACTIVE','EXPORT')"
                 ).fetchall()
                 destinations = connection.execute(
                     "SELECT destination_id,encrypted_url,encrypted_signing_secret FROM webhook_destinations"
@@ -523,16 +529,22 @@ def vault_rotate(old_key_file: Path, new_key_file: Path) -> None:
                     )
                 now = __import__("time").time_ns() // 1_000_000
                 for row, envelope in rotated:
-                    connection.execute(
-                        "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE bundle_id=?",
-                        (now, row["bundle_id"]),
-                    )
+                    state = str(row["state"])
+                    if state == "ACTIVE":
+                        connection.execute(
+                            "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE bundle_id=?",
+                            (now, row["bundle_id"]),
+                        )
+                    else:
+                        connection.execute(
+                            "DELETE FROM credential_bundles WHERE bundle_id=?", (row["bundle_id"],)
+                        )
                     connection.execute(
                         "INSERT INTO credential_bundles VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             envelope.bundle_id,
                             envelope.account_id,
-                            "ACTIVE",
+                            state,
                             envelope.envelope_version,
                             envelope.payload_schema_version,
                             envelope.key_id,
@@ -540,8 +552,8 @@ def vault_rotate(old_key_file: Path, new_key_file: Path) -> None:
                             envelope.ciphertext,
                             envelope.aad,
                             row["codex_version"],
-                            now,
-                            now,
+                            row["created_at_ms"] if state == "EXPORT" else now,
+                            now if state == "ACTIVE" else None,
                             None,
                         ),
                     )

@@ -458,6 +458,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "account_detail.html", detail=detail, csrf=request.cookies.get(CSRF_COOKIE, "")
         )
 
+    @app.post("/accounts/{public}/auth-export")
+    async def auth_export(
+        request: Request,
+        public: str,
+        admin_password: str = Form(),
+        csrf_token: str = Form(),
+    ) -> Response:
+        token = await require_form(request, csrf_token)
+        await require_reauthentication(request, token, admin_password)
+        content = await state(request).services.export_auth_json(public)
+        return _security_headers(
+            Response(
+                content=content,
+                media_type="application/json",
+                headers={"Content-Disposition": 'attachment; filename="auth.json"'},
+            ),
+            no_store=True,
+        )
+
     @app.post("/accounts/{public}/refresh")
     async def refresh(request: Request, public: str, csrf_token: str = Form()) -> Response:
         await require_form(request, csrf_token)
