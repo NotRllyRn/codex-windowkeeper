@@ -4,9 +4,11 @@ services:
     build: .
     init: true
     restart: unless-stopped
+    user: "0:0"
     network_mode: host
     read_only: true
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     environment:
       WINDOWKEEPER_HOST: 127.0.0.1

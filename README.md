@@ -51,7 +51,7 @@ uv run windowkeeper vault generate-key  # paste into .env
 docker compose up --build -d
 ```
 
-The image installs and manages Codex automatically, runs as UID 10001 with a read-only root filesystem, dropped capabilities, no-new-privileges, bounded tmpfs runtime trees, and a persistent `/data` volume. `/health/live` checks the process; `/health/ready` also requires the vault, administrator password, and working Codex executable.
+The image installs and manages Codex automatically. Its entrypoint uses only `CHOWN`, `SETGID`, and `SETUID` to initialize mounted-volume ownership, immediately drops to UID/GID 10001, and runs with a read-only root filesystem, no-new-privileges, bounded tmpfs runtime trees, and a persistent `/data` volume. `/health/live` checks the process; `/health/ready` also requires the vault, administrator password, and working Codex executable.
 
 ### OAuth deployment modes
 

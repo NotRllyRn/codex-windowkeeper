@@ -3,8 +3,10 @@ services:
     build: .
     init: true
     restart: unless-stopped
+    user: "0:0"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     ports:
       - "${WINDOWKEEPER_BIND_ADDRESS:-127.0.0.1}:${WINDOWKEEPER_PORT:-8787}:8787"
