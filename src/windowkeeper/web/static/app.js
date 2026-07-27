@@ -22,6 +22,41 @@ themeButton?.addEventListener("click", () => {
 	updateThemeLabel();
 });
 
+const timestampPattern =
+	/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})|\b(?:\d{13}|\d{10})\b/g;
+const timestampNodes = [];
+const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+while (walker.nextNode()) {
+	timestampPattern.lastIndex = 0;
+	if (timestampPattern.test(walker.currentNode.data))
+		timestampNodes.push([walker.currentNode, walker.currentNode.data]);
+}
+
+function relativeTime(value) {
+	const milliseconds = /^\d{10}$/.test(value)
+		? Number(value) * 1000
+		: /^\d{13}$/.test(value)
+			? Number(value)
+			: Date.parse(value);
+	if (!Number.isFinite(milliseconds)) return value;
+	const difference = milliseconds - Date.now();
+	const duration = Math.abs(difference);
+	const [amount, unit] =
+		duration >= 86_400_000
+			? [Math.ceil(duration / 86_400_000), "day"]
+			: duration >= 3_600_000
+				? [Math.ceil(duration / 3_600_000), "hour"]
+				: [Math.max(1, Math.ceil(duration / 60_000)), "minute"];
+	return `${amount} ${unit}${amount === 1 ? "" : "s"} ${difference >= 0 ? "left" : "ago"}`;
+}
+
+function updateRelativeTimes() {
+	for (const [node, source] of timestampNodes)
+		node.data = source.replace(timestampPattern, relativeTime);
+}
+updateRelativeTimes();
+setInterval(updateRelativeTimes, 60_000);
+
 document
 	.querySelector("[data-refresh-page]")
 	?.addEventListener("click", () => location.reload());
