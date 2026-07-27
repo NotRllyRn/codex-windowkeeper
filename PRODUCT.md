@@ -25,7 +25,7 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 ## Capabilities and Constraints
 
 - Multiple independently authenticated accounts with overlapping labels.
-- Official pinned Codex app-server is the only upstream integration seam.
+- The Codex app-server installed and managed by Windowkeeper is the only upstream integration seam.
 - Device-code login is recommended; browser login supports automatic loopback and strict one-time manual callback forwarding.
 - SQLite is the durable store; one process owns one data directory.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories.
@@ -33,11 +33,11 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 - FastAPI, Jinja, native JavaScript, native SSE, Click, and no Node build or client router.
 - Dashboard view models remain independent from layout experiments.
 - WCAG 2.2 AA target.
-- Exact Codex release and protected live-account gates remain release-time decisions and must not be fabricated.
+- Protected live-account gates remain release-time decisions and must not be fabricated.
 
 ## Evidence on Hand
 
-The implementation baseline is `WINDOWKEEPER_V1_DETAILED_IMPLEMENTATION_PLAN.md`. The dual-login add-on is `WINDOWKEEPER_V1_ADDON_DUAL_CHATGPT_OAUTH.md`. No customer claims, benchmarks, brand assets, production credentials, or approved Codex release digest are present and future work must not invent them.
+The implementation baseline is `WINDOWKEEPER_V1_DETAILED_IMPLEMENTATION_PLAN.md`. The dual-login add-on is `WINDOWKEEPER_V1_ADDON_DUAL_CHATGPT_OAUTH.md`. No customer claims, benchmarks, brand assets, or production credentials are present and future work must not invent them.
 
 ## Product Principles
 

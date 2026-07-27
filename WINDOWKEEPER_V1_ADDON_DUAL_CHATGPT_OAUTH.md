@@ -1,5 +1,7 @@
 # Windowkeeper v1 Add-On Plan: Dual ChatGPT OAuth Sign-In
 
+> **Implementation update:** Windowkeeper now pins and installs its supported Codex release inside the image. Operator-supplied Codex package, version-output, and SHA-256 settings described below are superseded and are not required.
+
 **Document type:** Add-on feature plan  
 **Applies to:** `WINDOWKEEPER_V1_DETAILED_IMPLEMENTATION_PLAN.md`  
 **Research date:** July 26, 2026  
@@ -18,7 +20,7 @@ This document is an additive implementation specification. It does not replace t
 Windowkeeper v1 should support two user-visible ChatGPT sign-in choices:
 
 | User-visible choice | Internal identifier | Official app-server login type | Recommended use |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Sign in with browser** | `CHATGPT_BROWSER` | `chatgpt` | A browser can reach the Codex loopback callback, or the operator can use the secure manual callback-forwarding fallback. |
 | **Sign in with a code** | `CHATGPT_DEVICE_CODE` | `chatgptDeviceCode` | Default for Docker, remote servers, SSH, NAS devices, and browsers running on another computer. |
 
@@ -140,7 +142,7 @@ The returned device interaction includes a login identifier, verification URL, a
 Codex owns token persistence and automatic refresh for both managed ChatGPT flows. This makes the app-server the correct boundary for Windowkeeper.
 
 **Primary source:**  
-https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md
+<https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
 
 ## 3.2 Browser callback behavior
 
@@ -163,9 +165,9 @@ The callback server is intentionally local. It is not a normal LAN-facing HTTP e
 
 The app-server documentation allows `useHostedLoginSuccessPage: true` and `appBrand: "codex"` or `"chatgpt"`, but these options only change the success page after the local callback has been received. They do not eliminate the loopback callback requirement.
 
-**Primary sources:**  
-https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs  
-https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md
+**Primary sources:**
+<https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs>
+<https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
 
 ## 3.3 Pi Agent findings
 
@@ -178,10 +180,10 @@ Pi directly implements OAuth, including PKCE, state validation, callback handlin
 
 Windowkeeper should adopt Pi's **UX pattern**, not its OAuth ownership model. Windowkeeper already depends on the official Codex runtime, so duplicating OAuth would create two implementations of token refresh and credential serialization.
 
-**Primary sources:**  
-https://github.com/earendil-works/pi  
-https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md  
-https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/custom-provider.md
+**Primary sources:**
+<https://github.com/earendil-works/pi>
+<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md>
+<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/custom-provider.md>
 
 ## 3.4 OpenCode findings
 
@@ -197,7 +199,7 @@ OpenCode's issue history also demonstrates the maintenance cost of owning this i
 Windowkeeper should use this as evidence for a narrow adapter around the official app-server rather than copying OpenCode's OAuth client.
 
 **Primary source:**  
-https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/plugin/codex.ts
+<https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/plugin/codex.ts>
 
 ## 3.5 Hermes findings
 
@@ -209,15 +211,15 @@ This distinction matters: Hermes validates device-code support and credential re
 
 Windowkeeper should not copy/import an arbitrary active Codex credential file by default because Windowkeeper's account-isolation model requires one credential lineage to have one owner. The useful Hermes lesson is that browser and device-code sessions ultimately produce compatible Codex credential state.
 
-**Primary sources:**  
-https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py  
-https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md  
-https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/codex-app-server-runtime.md
+**Primary sources:**
+<https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py>
+<https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md>
+<https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/codex-app-server-runtime.md>
 
 ## 3.6 Comparative conclusion
 
 | Implementation | Browser flow | Device-code flow | Own token exchange/refresh? | Windowkeeper lesson |
-|---|---:|---:|---:|---|
+| --- | ---: | ---: | ---: | --- |
 | Official Codex app-server | Yes | Yes | Official runtime owns it | **Use as production boundary.** |
 | Pi Agent | Yes | Yes | Yes | Reuse login-method selector and manual callback fallback UX. |
 | OpenCode | Yes | Yes | Yes | Confirms dual-flow UX; reported regressions show integration-maintenance risk. |
@@ -616,11 +618,11 @@ This store is intentionally lost on restart. Startup converts corresponding nont
 }
 ```
 
-9. Validate the response against the generated stable schema.
-10. Store only the safe upstream login identifier and expiration metadata durably.
-11. Put the verification URL and user code in the transient interaction store.
-12. Transition to `WAITING_FOR_USER`.
-13. Send a non-sensitive SSE event indicating that interaction is ready.
+1. Validate the response against the generated stable schema.
+2. Store only the safe upstream login identifier and expiration metadata durably.
+3. Put the verification URL and user code in the transient interaction store.
+4. Transition to `WAITING_FOR_USER`.
+5. Send a non-sensitive SSE event indicating that interaction is ready.
 
 ## 8.2 Dashboard presentation
 
@@ -669,7 +671,7 @@ After completion, destroy the user code and verification URL before beginning ac
 Classify:
 
 | Condition | Windowkeeper result |
-|---|---|
+| --- | --- |
 | User has not approved yet | Remain `WAITING_FOR_USER`; app-server owns polling. |
 | User denies authorization | `FAILED_ACTION_REQUIRED` with a sanitized denial message. |
 | Code expires | `EXPIRED`. |
@@ -773,13 +775,13 @@ Sequence:
 http://localhost:1455/auth/callback?code=...&state=...
 ```
 
-4. If the browser cannot connect, it leaves the callback URL in the address bar.
-5. Windowkeeper displays a secure text field labeled **Paste the full callback URL**.
-6. The operator copies the complete URL from the browser and submits it to Windowkeeper.
-7. Windowkeeper validates the submitted URL against the active attempt.
-8. Windowkeeper makes a one-time internal loopback request to the app-server callback listener.
-9. The app-server validates state, exchanges the authorization code, stores credentials, and emits the normal completion notification.
-10. Windowkeeper destroys the submitted URL immediately.
+1. If the browser cannot connect, it leaves the callback URL in the address bar.
+2. Windowkeeper displays a secure text field labeled **Paste the full callback URL**.
+3. The operator copies the complete URL from the browser and submits it to Windowkeeper.
+4. Windowkeeper validates the submitted URL against the active attempt.
+5. Windowkeeper makes a one-time internal loopback request to the app-server callback listener.
+6. The app-server validates state, exchanges the authorization code, stores credentials, and emits the normal completion notification.
+7. Windowkeeper destroys the submitted URL immediately.
 
 This is a controlled version of the established remote/headless workaround where the failed callback request is replayed on the machine where Codex is listening. Pi also uses a manual return-value fallback for browser OAuth.
 
@@ -1684,39 +1686,39 @@ Never send the callback URL, authorization URL, or one-time code to another pers
 ### Official OpenAI/Codex
 
 - Codex app-server authentication endpoints and managed login modes:  
-  https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md
+  <https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
 - Codex browser callback server, default/fallback ports, redirect handling, PKCE, and token persistence:  
-  https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs
+  <https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs>
 - Remote/headless OAuth discussion and callback replay/port-forwarding examples:  
-  https://github.com/openai/codex/discussions/4650
+  <https://github.com/openai/codex/discussions/4650>
 - Remote callback listener issue and confirmed local-curl behavior:  
-  https://github.com/openai/codex/issues/4265
+  <https://github.com/openai/codex/issues/4265>
 
 ### Pi Agent
 
-- Repository:  
-  https://github.com/earendil-works/pi
-- Provider and OAuth documentation:  
-  https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md  
-  https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/custom-provider.md
+- Repository:
+  <https://github.com/earendil-works/pi>
+- Provider and OAuth documentation:
+  <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md>
+  <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/custom-provider.md>
 
 ### OpenCode
 
 - Codex OAuth plugin source containing browser and headless methods:  
-  https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/plugin/codex.ts
+  <https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/plugin/codex.ts>
 - Authentication-method regression report:  
-  https://github.com/anomalyco/opencode/issues/27905
+  <https://github.com/anomalyco/opencode/issues/27905>
 - Browser token-exchange failure report:  
-  https://github.com/anomalyco/opencode/issues/16281
+  <https://github.com/anomalyco/opencode/issues/16281>
 
 ### Hermes Agent
 
 - Authentication implementation:  
-  https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py
+  <https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py>
 - Provider documentation:  
-  https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md
+  <https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md>
 - Codex runtime credential prerequisites:  
-  https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/codex-app-server-runtime.md
+  <https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/codex-app-server-runtime.md>
 
 ---
 

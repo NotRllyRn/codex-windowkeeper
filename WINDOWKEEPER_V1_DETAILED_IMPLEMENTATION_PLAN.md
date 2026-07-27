@@ -1,5 +1,7 @@
 # Windowkeeper v1 Detailed Implementation Plan
 
+> **Implementation update:** Windowkeeper now pins and installs its supported Codex release inside the image. Operator-supplied Codex package, version-output, and SHA-256 settings described below are superseded and are not required.
+
 **Document status:** Implementation baseline  
 **Target release:** Windowkeeper v1  
 **Deployment model:** Single-operator, self-hosted, Docker-first service  
@@ -705,7 +707,6 @@ A child crash affects only its account actor. The actor:
 - Opens or updates the relevant account incident.
 - Cleans up the process group.
 - Starts a fresh runtime only when reconciliation or queued work requires it.
-
 
 ---
 
@@ -1935,7 +1936,6 @@ A single transient timeout does not immediately create an incident.
 ### 20.11 Retention
 
 Keep all actual coalesced refresh attempts for 30 days. Cleanup deletes oldest rows in small ordered batches, commits between batches, yields to foreground work, and performs bounded incremental vacuum only when a free-page threshold is exceeded.
-
 
 ---
 
@@ -3899,7 +3899,7 @@ The final release candidate must demonstrate:
 ## 39. Failure-mode matrix
 
 | Failure | Required behavior |
-|---|---|
+| --- | --- |
 | Invalid startup configuration | Service not ready; precise redacted diagnostic; no account workers |
 | Singleton lock held | Exit nonzero before opening database |
 | Wrong vault key | Service unavailable; no destructive writes or credential deletion |
@@ -4058,7 +4058,7 @@ Finalize through fake-server and container latency tests. Threshold changes requ
 ## 44. Decision register
 
 | Area | v1 decision |
-|---|---|
+| --- | --- |
 | Product | Multi-account automatic activation retained |
 | Duplicate contract | At most one accepted turn per account/window; ambiguous fails closed |
 | Usage source | App-server `account/rateLimits/read` only |

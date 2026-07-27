@@ -1,6 +1,6 @@
 # Release gates
 
-Windowkeeper is intentionally fail-closed until a release operator supplies and validates one exact Codex compatibility tuple. This file separates repository checks from evidence that can only be produced in the release environment.
+Windowkeeper installs Codex as part of its image and checks it automatically at startup. This file separates repository checks from evidence that can only be produced in the release environment.
 
 ## Repository checks
 
@@ -23,7 +23,7 @@ CI uses commit-SHA-pinned actions and publishes multi-architecture images with S
 
 ## Release-environment evidence
 
-Do not publish a release until all of the following are recorded for the chosen Codex package and image digest:
+Do not publish a release until all of the following are recorded for the Codex package installed in the image:
 
 - Exact Codex package version, `codex --version` output, executable SHA-256, initialization schema, login methods, callback ports, credential-file allowlist, usage shape, persistent-thread behavior, and no-tool activation profile.
 - Device-code enrollment for at least two isolated real accounts and browser OAuth in each enabled deployment mode.
@@ -35,4 +35,4 @@ Do not publish a release until all of the following are recorded for the chosen 
 - Native or emulated `linux/amd64` and `linux/arm64` image startup, readiness, device login, activation safety, backup/restore, and vulnerability scan.
 - Registry signature/attestation verification and an approved exception for any remaining non-fixable high or critical image vulnerability.
 
-Record the approved tuple in deployment configuration; never replace `unverified` defaults in source with an unproven current/latest release. `windowkeeper doctor` and `/health/ready` must remain blocked on any mismatch.
+Operators do not configure Codex versions or digests. Record the observed release evidence with the image; `windowkeeper doctor` and `/health/ready` must remain blocked when the managed executable is missing or cannot start.

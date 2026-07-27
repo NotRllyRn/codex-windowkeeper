@@ -1,14 +1,12 @@
 # pyright: reportMissingImports=false
 
 import asyncio
-import hashlib
 import ipaddress
 import json
 import os
 import shutil
 import sqlite3
 import stat
-import subprocess
 import time
 from contextlib import closing
 from pathlib import Path
@@ -18,6 +16,7 @@ import click
 import httpx
 import uvicorn
 
+from windowkeeper.compatibility import inspect_codex
 from windowkeeper.config import Settings, get_settings
 from windowkeeper.database import Database
 from windowkeeper.security import AdminSecurity
@@ -260,7 +259,7 @@ def status(as_json: bool) -> None:
 
 @cli.command()
 def doctor() -> None:
-    """Validate configuration, filesystem boundaries, and Codex compatibility."""
+    """Validate configuration, filesystem boundaries, and managed Codex."""
     settings = _settings()
     checks: list[tuple[str, bool, str]] = []
     checks.append(
@@ -270,33 +269,8 @@ def doctor() -> None:
             "persistent and runtime roots differ",
         )
     )
-    executable = shutil.which(settings.codex_executable)
-    checks.append(("codex executable", executable is not None, executable or "not found"))
-    if executable:
-        try:
-            observed_version = subprocess.run(  # noqa: S603
-                [executable, "--version"], capture_output=True, text=True, timeout=10, check=True
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as error:
-            observed_version = f"unavailable ({type(error).__name__})"
-        try:
-            executable_digest = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
-        except OSError as error:
-            executable_digest = f"unavailable ({type(error).__name__})"
-        checks.append(
-            (
-                "codex version",
-                settings.codex_version == observed_version,
-                observed_version,
-            )
-        )
-        checks.append(
-            (
-                "codex digest",
-                settings.codex_sha256 == executable_digest,
-                executable_digest,
-            )
-        )
+    compatibility = inspect_codex(settings)
+    checks.append(("managed codex", compatibility.compatible, compatibility.detail))
     failed = False
     for name, ok, detail in checks:
         failed |= not ok

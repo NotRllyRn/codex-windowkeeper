@@ -7,11 +7,9 @@ COPY src ./src
 RUN python -m build --wheel
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG CODEX_VERSION
-RUN test -n "$CODEX_VERSION" \
- && apt-get update \
+RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
- && npm install --global "@openai/codex@$CODEX_VERSION" \
+ && npm install --global @openai/codex@0.145.0 \
  && npm cache clean --force \
  && apt-get purge -y npm \
  && apt-get autoremove -y \

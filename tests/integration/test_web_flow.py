@@ -1,4 +1,3 @@
-import hashlib
 import os
 import time
 from pathlib import Path
@@ -31,8 +30,6 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         vault_key=generate_key(),
         admin_password=PASSWORD,
         codex_executable=str(executable),
-        codex_version="codex-cli 1.2.3",
-        codex_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
         codex_idle_seconds=0,
         activation_safety_delay_seconds=1,
         activation_jitter_max_seconds=0,

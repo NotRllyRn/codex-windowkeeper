@@ -30,9 +30,9 @@
     </p>
   </article>
   <article>
-    <h2>Codex compatibility</h2>
+    <h2>Managed Codex</h2>
     <strong
-      >{{ 'Verified' if compatibility.compatible else 'Unavailable' }}</strong
+      >{{ 'Available' if compatibility.compatible else 'Unavailable' }}</strong
     >
     <p>
       {{ compatibility.code|replace('_',' ')|title }}. {{ compatibility.detail

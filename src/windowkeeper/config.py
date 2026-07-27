@@ -48,8 +48,7 @@ class Settings(BaseSettings):
     login_timeout_seconds: int = Field(default=900, ge=60, le=3600)
     browser_callback_max_bytes: int = Field(default=16384, ge=1024, le=65536)
     codex_executable: str = "codex"
-    codex_version: str = "unverified"
-    codex_sha256: str = "unverified"
+    codex_version: str = "unknown"
     log_level: str = "INFO"
 
     @field_validator("root_path")

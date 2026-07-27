@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 if "--version" in sys.argv:
-    print("codex-cli 1.2.3")
+    print("codex-cli 0.145.0")
     raise SystemExit(0)
 
 home = Path(os.environ["CODEX_HOME"])

@@ -186,6 +186,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
 
             await database.transaction(verify_vault)
+        compatibility = inspect_codex(settings)
+        if compatibility.observed_version:
+            settings.codex_version = compatibility.observed_version
         events = Broadcaster()
         runtime = RuntimeManager(settings, vault)
         webhooks = WebhookDispatcher(database, vault)
@@ -198,7 +201,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         logbook = configure_logging(
             settings.log_dir or settings.data_dir / "logs", settings.log_level
         )
-        compatibility = inspect_codex(settings)
         state = AppState(
             settings,
             database,

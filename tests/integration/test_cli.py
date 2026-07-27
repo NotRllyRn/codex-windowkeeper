@@ -1,4 +1,3 @@
-import hashlib
 import json
 from pathlib import Path
 
@@ -72,12 +71,10 @@ def test_cli_initialization_vault_verification_and_version(tmp_path: Path) -> No
     compatible_environment = {
         **environment,
         "WINDOWKEEPER_CODEX_EXECUTABLE": str(executable),
-        "WINDOWKEEPER_CODEX_VERSION": "codex-cli 1.2.3",
-        "WINDOWKEEPER_CODEX_SHA256": hashlib.sha256(executable.read_bytes()).hexdigest(),
     }
     doctor = runner.invoke(cli, ["doctor"], env=compatible_environment)
     assert doctor.exit_code == 0, doctor.output
-    assert "PASS  codex digest" in doctor.output
+    assert "PASS  managed codex: Managed Codex is available (codex-cli 0.145.0)" in doctor.output
 
     health = runner.invoke(
         cli,

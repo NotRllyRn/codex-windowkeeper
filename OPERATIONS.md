@@ -12,7 +12,7 @@ windowkeeper doctor
 windowkeeper serve
 ```
 
-Set a 15+ character `WINDOWKEEPER_ADMIN_PASSWORD` in `.env`. Windowkeeper loads the file automatically, creates the vault sentinel on first start, and never stores the vault key in SQLite. `.env` is ignored by Git and Docker builds, but it is still plaintext: keep mode `0600`, do not share it, and restrict access to the repository directory. A service is not ready until `doctor` confirms the exact configured Codex version and executable SHA-256.
+Set a 15+ character `WINDOWKEEPER_ADMIN_PASSWORD` in `.env`. Windowkeeper loads the file automatically, creates the vault sentinel on first start, and never stores the vault key in SQLite. `.env` is ignored by Git and Docker builds, but it is still plaintext: keep mode `0600`, do not share it, and restrict access to the repository directory. A service is not ready until `doctor` confirms that the managed Codex executable starts successfully.
 
 ## Account sign-in
 
@@ -58,7 +58,7 @@ Bind Windowkeeper to loopback or a private interface. Set `WINDOWKEEPER_PUBLIC_B
 2. Read the incident, operation history, and sanitized logs; retain IDs, timestamps, and error codes only.
 3. For `authentication_failed`, reauthenticate and verify the same upstream account/workspace.
 4. For `activation_ambiguous` or `activation_safety`, inspect upstream thread/turn evidence. Windowkeeper never retries that window. Use **Acknowledge without retry** only after review; this permits future windows, not the ambiguous one.
-5. For compatibility failures, stop the service and re-run the official contract proof against the intended Codex release before updating both pins.
+5. For Codex startup failures, rebuild the image and inspect `windowkeeper doctor` before restarting.
 6. For suspected key or host compromise, stop the service, preserve encrypted evidence, rotate credentials outside Windowkeeper, rotate the vault key, and revoke administrator sessions by resetting the password.
 
 Never attach credential files, callback URLs, device codes, vault keys, passwords, SQLite databases, runtime trees, or unsanitized logs to an issue.
@@ -67,13 +67,13 @@ Never attach credential files, callback URLs, device codes, vault keys, password
 
 1. Stop the service and create a database backup.
 2. Keep the old image/package, database backup, and vault key.
-3. Validate the target Codex release; record exact version output and executable SHA-256.
+3. Build the target image and validate its managed Codex release.
 4. Install the new Windowkeeper release and run `windowkeeper doctor`.
 5. Start it and verify readiness, account refresh, incident state, and webhook delivery.
-6. Roll back by stopping the service, restoring the matching backup, restoring the prior package/image and compatibility pins, verifying the vault key, and starting again.
+6. Roll back by stopping the service, restoring the matching backup and prior image, verifying the vault key, and starting again.
 
 Never downgrade a database to a release that does not support its schema.
 
 ## Security boundary
 
-Windowkeeper protects credentials at rest, isolates runtime credential trees, redacts known secret-bearing values, and fails closed on compatibility drift. Secrets supplied through `.env` are visible to the Windowkeeper process and may be visible to users allowed to inspect its environment or Docker container; use file-backed secrets instead when that distinction matters. Windowkeeper cannot protect against root, a compromised host, or a malicious binary that already matches the operator-configured digest. The validated Codex child process necessarily receives plaintext credentials while its isolated runtime is active.
+Windowkeeper protects credentials at rest, isolates runtime credential trees, redacts known secret-bearing values, and refuses to become ready when Codex is unavailable. Secrets supplied through `.env` are visible to the Windowkeeper process and may be visible to users allowed to inspect its environment or Docker container; use file-backed secrets instead when that distinction matters. Windowkeeper cannot protect against root, a compromised host, or a malicious Codex binary. The managed Codex child process necessarily receives plaintext credentials while its isolated runtime is active.

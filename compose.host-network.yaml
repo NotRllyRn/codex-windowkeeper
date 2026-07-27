@@ -1,10 +1,7 @@
 # Linux-only standalone profile for automatic browser loopback OAuth.
 services:
   windowkeeper:
-    build:
-      context: .
-      args:
-        CODEX_VERSION: ${WINDOWKEEPER_CODEX_PACKAGE_VERSION:?Set the validated Codex npm package version}
+    build: .
     image: codex-windowkeeper:${WINDOWKEEPER_IMAGE_TAG:-local}
     init: true
     restart: unless-stopped
@@ -18,8 +15,6 @@ services:
       WINDOWKEEPER_PUBLIC_BASE_URL: ${WINDOWKEEPER_PUBLIC_BASE_URL:-}
       WINDOWKEEPER_COOKIE_SECURE: ${WINDOWKEEPER_COOKIE_SECURE:-auto}
       WINDOWKEEPER_BROWSER_OAUTH_MODE: host-loopback
-      WINDOWKEEPER_CODEX_VERSION: ${WINDOWKEEPER_CODEX_VERSION:?Set exact `codex --version` output}
-      WINDOWKEEPER_CODEX_SHA256: ${WINDOWKEEPER_CODEX_SHA256:?Set the validated Codex executable SHA-256}
       WINDOWKEEPER_VAULT_KEY: ${WINDOWKEEPER_VAULT_KEY:?Set WINDOWKEEPER_VAULT_KEY in .env}
       WINDOWKEEPER_ADMIN_PASSWORD: ${WINDOWKEEPER_ADMIN_PASSWORD:?Set WINDOWKEEPER_ADMIN_PASSWORD in .env}
     volumes:

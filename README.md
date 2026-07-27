@@ -1,6 +1,6 @@
 # Codex Windowkeeper
 
-Windowkeeper is a single-instance supervisor for independently authenticated ChatGPT/Codex accounts. It reads authoritative short and weekly usage windows from the pinned Codex app-server, schedules one evidence-backed activation per reset window, and makes ambiguous submissions visible instead of retrying blindly.
+Windowkeeper is a single-instance supervisor for independently authenticated ChatGPT/Codex accounts. It reads authoritative short and weekly usage windows from the managed Codex app-server, schedules one evidence-backed activation per reset window, and makes ambiguous submissions visible instead of retrying blindly.
 
 ## What ships
 
@@ -9,7 +9,7 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 - Confirmed, estimated, and unknown scheduling states; manual activation uses the same deduplication path.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
 - Durable operations, incidents, SSE updates, sanitized JSONL logs, and generic/Slack/Discord webhooks.
-- SQLite, AES-256-GCM, opaque administrator sessions, CSRF, recent-password confirmation, and fail-closed Codex compatibility checks.
+- SQLite, AES-256-GCM, opaque administrator sessions, CSRF, recent-password confirmation, and managed Codex availability checks.
 
 Windowkeeper does **not** pool quota, route work between accounts, expose a public API, or call undocumented usage endpoints.
 
@@ -36,12 +36,12 @@ uv run windowkeeper serve
 
 Windowkeeper loads `.env` automatically. The file is ignored by Git and excluded from Docker build contexts; never commit it.
 
-A service is ready only when the vault is configured and the observed Codex `--version` output and executable SHA-256 exactly equal `WINDOWKEEPER_CODEX_VERSION` and `WINDOWKEEPER_CODEX_SHA256`.
+A service is ready once the vault and administrator password are configured and the managed Codex executable starts successfully.
 
 ## Hardened Docker Compose
 
 1. Run `cp .env.example .env && chmod 600 .env`.
-2. Fill in the administrator password, generated vault key, and validated Codex compatibility tuple.
+2. Fill in the administrator password and generated vault key.
 3. Run `docker compose up --build -d`. Compose reads `.env` automatically.
 
 ```bash
@@ -51,7 +51,7 @@ uv run windowkeeper vault generate-key  # paste into .env
 docker compose up --build -d
 ```
 
-The image runs as UID 10001 with a read-only root filesystem, dropped capabilities, no-new-privileges, bounded tmpfs runtime trees, and a persistent `/data` volume. `/health/live` checks the process; `/health/ready` also requires the vault and exact Codex compatibility tuple.
+The image installs and manages Codex automatically, runs as UID 10001 with a read-only root filesystem, dropped capabilities, no-new-privileges, bounded tmpfs runtime trees, and a persistent `/data` volume. `/health/live` checks the process; `/health/ready` also requires the vault, administrator password, and working Codex executable.
 
 ### OAuth deployment modes
 
@@ -86,7 +86,7 @@ The dashboard provides account enable/disable, reauthentication, typed-confirmat
 
 The vault key must not live in SQLite or the persistent data directory. Runtime credential files exist only under the runtime tmpfs and are removed when the account process stops. URL query strings, callback values, device codes, tokens, authorization headers, and known token-shaped strings are redacted before logs, SSE, API responses, incidents, or webhooks.
 
-Windowkeeper trusts the pinned Codex child process with plaintext credentials while that isolated process is running. It does not protect against a compromised host, root user, or malicious validated Codex binary.
+Windowkeeper trusts its managed Codex child process with plaintext credentials while that isolated process is running. It does not protect against a compromised host, root user, or malicious Codex binary.
 
 ## UI evaluation
 

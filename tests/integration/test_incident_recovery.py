@@ -1,4 +1,3 @@
-import hashlib
 import os
 import sqlite3
 import time
@@ -33,8 +32,6 @@ def test_workspace_failure_opens_and_reauthentication_resolves_incident(
         vault_key=generate_key(),
         admin_password=PASSWORD,
         codex_executable=str(executable),
-        codex_version="codex-cli 1.2.3",
-        codex_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
         codex_idle_seconds=0,
     )
     with TestClient(create_app(settings)) as client:
@@ -99,8 +96,6 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
         vault_key=generate_key(),
         admin_password=PASSWORD,
         codex_executable=str(executable),
-        codex_version="codex-cli 1.2.3",
-        codex_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
         codex_idle_seconds=0,
         activation_safety_delay_seconds=1,
         activation_jitter_max_seconds=0,
