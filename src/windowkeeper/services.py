@@ -25,6 +25,42 @@ from .vault import Envelope, Vault
 
 PROMPT = 'Respond with exactly "OK" and perform no other actions.'
 PROMPT_DIGEST = hashlib.sha256(PROMPT.encode()).digest()
+INCIDENT_GUIDANCE = {
+    "activation_ambiguous": (
+        "Windowkeeper dispatched an activation but could not prove whether Codex completed it, so replay is blocked to prevent duplicate usage.",
+        "Open the account, review the latest activation operation, then acknowledge the ambiguity to resume scheduling.",
+    ),
+    "activation_safety": (
+        "Codex requested an action outside Windowkeeper's read-only, no-tool activation contract.",
+        "Review the activation evidence, verify the pinned Codex release, then acknowledge the safety block only when it is understood.",
+    ),
+    "authentication_failed": (
+        "Codex rejected or could not refresh the account credential, so usage refresh and activation cannot continue.",
+        "Open the account and use Replace or repair credentials with device code, browser sign-in, or valid pasted tokens.",
+    ),
+}
+
+
+def _incident_webhook_data(
+    details: dict[str, Any], status: str, summary: str, reason: str, action: str
+) -> dict[str, Any]:
+    return {
+        "incident_id": details["incident_id"],
+        "problem_type": details["problem_type"],
+        "incident_status": status,
+        "severity": details["severity"],
+        "summary": summary,
+        "cause_code": details["cause_code"],
+        "cause_summary": details["cause_summary"],
+        "reason": reason,
+        "recommended_action": action,
+        "occurrence_count": details["occurrence_count"],
+        "first_seen_at_ms": details["opened_at_ms"],
+        "last_seen_at_ms": details["last_seen_at_ms"],
+        "account_name": details["display_name"],
+        "account_email": details["upstream_email"],
+        "account_id": details["public_token"],
+    }
 
 
 class ServiceSettings(Protocol):
@@ -2162,79 +2198,116 @@ class ApplicationServices:
         now = self.clock.now_ms()
         summary = str(redact(summary))[:200]
 
-        def work(connection: sqlite3.Connection) -> tuple[str, bool]:
+        def work(connection: sqlite3.Connection) -> tuple[dict[str, Any], bool]:
             row = connection.execute(
                 "SELECT incident_id FROM incidents WHERE scope_kind='account' AND scope_key=? AND problem_type=? AND state='OPEN'",
                 (account_id, kind),
             ).fetchone()
+            opened = not row
             if row:
+                incident = str(row[0])
                 connection.execute(
                     "UPDATE incidents SET occurrence_count=occurrence_count+1,last_seen_at_ms=?,summary=?,state_version=state_version+1 WHERE incident_id=?",
-                    (now, summary, row[0]),
+                    (now, summary, incident),
                 )
-                return str(row[0]), False
-            connection.execute(
-                "INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            else:
+                incident = incident_id
+                connection.execute(
+                    "INSERT INTO incidents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        incident,
+                        "account",
+                        account_id,
+                        kind,
+                        "OPEN",
+                        severity,
+                        summary,
+                        kind.upper(),
+                        1,
+                        now,
+                        now,
+                        None,
+                        None,
+                        1,
+                    ),
+                )
+            details = connection.execute(
+                """SELECT i.incident_id,i.problem_type,i.severity,i.summary,
+                i.occurrence_count,i.opened_at_ms,i.last_seen_at_ms,a.display_name,s.upstream_email,
+                a.public_token,COALESCE(s.last_error_code,i.current_error_code) AS cause_code,
+                COALESCE(s.last_error_summary,i.summary) AS cause_summary
+                FROM incidents i JOIN accounts a ON a.account_id=i.scope_key
+                JOIN account_state s ON s.account_id=a.account_id WHERE i.incident_id=?""",
+                (incident,),
+            ).fetchone()
+            if not details:
+                raise RuntimeError("incident context is unavailable")
+            return dict(details), opened
+
+        details, opened = await self.database.transaction(work)
+        incident_id = str(details["incident_id"])
+        self.events.publish("incident.updated", {"incident_id": incident_id, "state": "OPEN"})
+        if self.webhooks:
+            reason, action = INCIDENT_GUIDANCE.get(
+                kind,
                 (
-                    incident_id,
-                    "account",
-                    account_id,
-                    kind,
-                    "OPEN",
-                    severity,
-                    summary,
-                    kind.upper(),
-                    1,
-                    now,
-                    now,
-                    None,
-                    None,
-                    1,
+                    "Windowkeeper detected an account condition that requires operator attention.",
+                    "Open the account and Incidents pages, review the latest operation, and correct the reported condition.",
                 ),
             )
-            return incident_id, True
-
-        value, opened = await self.database.transaction(work)
-        self.events.publish("incident.updated", {"incident_id": value, "state": "OPEN"})
-        if self.webhooks:
             await self.webhooks.emit(
                 "incident.opened" if opened else "incident.updated",
-                f"account:{account_id}",
-                {
-                    "incident_id": value,
-                    "problem_type": kind,
-                    "severity": severity,
-                    "summary": summary,
-                },
-                value,
+                f"account:{details['public_token']}",
+                _incident_webhook_data(details, "OPEN", str(details["summary"]), reason, action),
+                incident_id,
             )
-        return value
+        return incident_id
 
     async def resolve_incident(self, account_id: str, kind: str) -> None:
         now = self.clock.now_ms()
 
-        def work(connection: sqlite3.Connection) -> str | None:
+        def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
             row = connection.execute(
-                "SELECT incident_id FROM incidents WHERE scope_kind='account' AND scope_key=? AND problem_type=? AND state='OPEN'",
+                """SELECT i.incident_id,i.problem_type,i.severity,i.summary,
+                i.current_error_code AS cause_code,i.summary AS cause_summary,
+                i.occurrence_count,i.opened_at_ms,i.last_seen_at_ms,a.display_name,s.upstream_email,
+                a.public_token FROM incidents i JOIN accounts a ON a.account_id=i.scope_key
+                JOIN account_state s ON s.account_id=a.account_id
+                WHERE i.scope_kind='account' AND i.scope_key=? AND i.problem_type=? AND i.state='OPEN'""",
                 (account_id, kind),
             ).fetchone()
             if not row:
                 return None
             connection.execute(
                 "UPDATE incidents SET state='RESOLVED',resolved_at_ms=?,resolution_reason='RECOVERED',state_version=state_version+1 WHERE incident_id=?",
-                (now, row[0]),
+                (now, row["incident_id"]),
             )
-            return str(row[0])
+            return dict(row)
 
-        incident_id = await self.database.transaction(work)
-        if not incident_id:
+        details = await self.database.transaction(work)
+        if not details:
             return
+        incident_id = str(details["incident_id"])
         self.events.publish("incident.updated", {"incident_id": incident_id, "state": "RESOLVED"})
         if self.webhooks:
+            reason, _ = INCIDENT_GUIDANCE.get(
+                kind,
+                (
+                    "Windowkeeper previously detected an account condition requiring attention.",
+                    "",
+                ),
+            )
             await self.webhooks.emit(
                 "incident.resolved",
-                f"account:{account_id}",
-                {"incident_id": incident_id, "problem_type": kind, "summary": "Recovered"},
+                f"account:{details['public_token']}",
+                _incident_webhook_data(
+                    details,
+                    "RESOLVED",
+                    f"Recovered from: {details['summary']}",
+                    reason,
+                    "No action required. Windowkeeper closed this incident and resumed normal account processing.",
+                )
+                | {"resolved_at_ms": now},
                 incident_id,
             )
 

@@ -58,6 +58,21 @@ Rotation is offline and transactional. It re-encrypts managed credentials, downl
 
 Bind Windowkeeper to loopback or a private interface. Set `WINDOWKEEPER_TRUSTED_PROXIES` to an explicit comma-separated IP/CIDR allowlist when using a reverse proxy; wildcards are rejected. Use `WINDOWKEEPER_COOKIE_SECURE=true` for HTTPS. The proxy must preserve the configured root path, enforce request/body limits, and must not log query strings or request bodies. Do not expose Windowkeeper directly to the public internet.
 
+## Webhook notifications
+
+Every notification starts with `WINDOWKEEPER` and a stable type code:
+`WK-101` opened, `WK-102` repeated/updated, `WK-103` resolved, and `WK-900`
+test. Incident notifications identify the account, state, severity, occurrence
+count, detected condition, underlying error, why processing was blocked, and
+the recommended recovery action. The event ID uniquely distinguishes repeated
+notifications that share a type code. Slack and Discord receive readable
+provider-native messages; generic destinations receive the structured
+canonical event.
+
+Webhook destinations receive account display names and authenticated email
+addresses. Treat destinations as trusted operational systems and remove
+destinations that no longer require this metadata.
+
 ## Incident response
 
 1. Stop automatic activity by disabling the affected account.

@@ -5,6 +5,7 @@ import ipaddress
 import json
 import socket
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,29 +19,95 @@ from windowkeeper.vault import Vault
 
 RETRY_SECONDS = (60, 300, 1_800, 7_200, 21_600, 43_200, 86_400, 86_400)
 DESTINATION_KINDS = {"generic", "slack", "discord"}
+EVENT_CODES = {
+    "incident.opened": "WK-101",
+    "incident.updated": "WK-102",
+    "incident.resolved": "WK-103",
+    "windowkeeper.test": "WK-900",
+}
+EVENT_TITLES = {
+    "incident.opened": "INCIDENT OPENED",
+    "incident.updated": "INCIDENT UPDATED",
+    "incident.resolved": "INCIDENT RESOLVED",
+    "windowkeeper.test": "WEBHOOK TEST",
+}
+
+
+def _text(value: Any, limit: int = 600) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _notification_text(event: dict[str, Any]) -> str:
+    data = event["data"]
+    notification = event["notification"]
+    account = _text(data.get("account_name") or event["subject"])
+    email = _text(data.get("account_email"))
+    lines = [
+        f"WINDOWKEEPER · {notification['code']}",
+        str(notification["title"]),
+        "",
+        f"Account: {account}{f' <{email}>' if email else ''}",
+    ]
+    status = data.get("incident_status") or data.get("delivery_status")
+    if status or data.get("severity"):
+        lines.append(
+            f"Status: {_text(status or 'UNKNOWN')} · Severity: {_text(data.get('severity', 'INFO'))}"
+        )
+    lines.append(
+        f"What happened: {_text(data.get('summary') or data.get('message') or event['subject'])}"
+    )
+    cause = _text(data.get("cause_summary"))
+    if cause and cause != _text(data.get("summary")):
+        lines.append(f"Cause: {_text(data.get('cause_code'))} — {cause}")
+    if reason := _text(data.get("reason")):
+        lines.append(f"Why it matters: {reason}")
+    if action := _text(data.get("recommended_action")):
+        lines.append(f"How to fix: {action}")
+    if count := data.get("occurrence_count"):
+        lines.append(f"Occurrences: {count}")
+    if incident_id := _text(data.get("incident_id"), 64):
+        lines.append(f"Incident ID: {incident_id}")
+    lines.extend(
+        (
+            f"Event ID: {_text(event['event_id'], 64)}",
+            f"Occurred: {event['occurred_at']}",
+        )
+    )
+    return "\n".join(lines)
 
 
 def _provider_body(kind: str, event: dict[str, Any]) -> bytes:
+    message = _notification_text(event)
     if kind == "slack":
+        escaped = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         payload: dict[str, Any] = {
-            "text": f"Windowkeeper {event['event_type']}: {event['data'].get('summary', event['subject'])}",
+            "text": escaped[:3_000],
             "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": message.splitlines()[0][:150],
+                    },
+                },
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{event['event_type']}*\n{event['data'].get('summary', event['subject'])}",
+                        "text": escaped.split("\n", 1)[1].strip()[:3_000],
                     },
-                }
+                },
             ],
         }
     elif kind == "discord":
         payload = {
-            "content": f"Windowkeeper {event['event_type']}",
+            "content": message.splitlines()[0],
+            "allowed_mentions": {"parse": []},
             "embeds": [
                 {
-                    "title": str(event["event_type"]),
-                    "description": str(event["data"].get("summary", event["subject"])),
+                    "title": str(event["notification"]["title"]),
+                    "description": message.split("\n", 1)[1].strip()[:4_000],
+                    "footer": {"text": f"Windowkeeper event {event['event_id']}"},
                 }
             ],
         }
@@ -206,6 +273,12 @@ class WebhookDispatcher:
             "event_type": event_type,
             "subject": subject,
             "occurred_at_ms": now,
+            "occurred_at": datetime.fromtimestamp(now / 1000, UTC).isoformat(),
+            "notification": {
+                "source": "WINDOWKEEPER",
+                "code": EVENT_CODES.get(event_type, "WK-999"),
+                "title": EVENT_TITLES.get(event_type, event_type.replace(".", " ").upper()),
+            },
             "data": redact(data),
         }
         body = _provider_body("generic", event)
@@ -252,7 +325,13 @@ class WebhookDispatcher:
         return await self.emit(
             "windowkeeper.test",
             f"destination:{destination_id}",
-            {"destination_id": destination_id, "message": "Webhook test"},
+            {
+                "destination_id": destination_id,
+                "message": "Windowkeeper successfully created a test notification.",
+                "delivery_status": "DELIVERED",
+                "severity": "INFO",
+                "recommended_action": "No action required. This confirms the destination accepts Windowkeeper webhooks.",
+            },
             destination_id=destination_id,
         )
 

@@ -48,12 +48,35 @@ async def test_webhook_body_is_immutable_and_destination_is_encrypted(tmp_path: 
     discord = await dispatcher.create_destination(
         "Discord", "https://discord.test/api/webhooks/a", kind="discord"
     )
-    event = await dispatcher.emit("incident.opened", "account:a", {"summary": "Needs attention"})
+    event = await dispatcher.emit(
+        "incident.opened",
+        "account:a",
+        {
+            "account_name": "Arina",
+            "account_email": "arina@example.test",
+            "incident_status": "OPEN",
+            "severity": "ERROR",
+            "summary": "Activation outcome could not be proven",
+            "cause_code": "ACTIVATION_AMBIGUOUS",
+            "cause_summary": "Codex completion was not observed",
+            "reason": "Replay is blocked to prevent duplicate usage.",
+            "recommended_action": "Review the latest activation and acknowledge the ambiguity.",
+            "occurrence_count": 2,
+            "incident_id": "incident-1",
+        },
+    )
     row = await database.call(
         lambda connection: connection.execute(
             "SELECT immutable_body FROM webhook_deliveries WHERE destination_id=?", (destination,)
         ).fetchone()
     )
+    generic_body = json.loads(bytes(row[0]))
+    assert generic_body["notification"] == {
+        "source": "WINDOWKEEPER",
+        "code": "WK-101",
+        "title": "INCIDENT OPENED",
+    }
+    assert generic_body["data"]["account_name"] == "Arina"
     assert event.encode() in bytes(row[0])
     provider_rows = await database.call(
         lambda connection: connection.execute(
@@ -62,8 +85,12 @@ async def test_webhook_body_is_immutable_and_destination_is_encrypted(tmp_path: 
         ).fetchall()
     )
     provider_bodies = {item[0]: json.loads(bytes(item[1])) for item in provider_rows}
-    assert "blocks" in provider_bodies[slack]
-    assert "embeds" in provider_bodies[discord]
+    assert provider_bodies[slack]["blocks"][0]["text"]["text"] == "WINDOWKEEPER · WK-101"
+    assert "Arina &lt;arina@example.test&gt;" in provider_bodies[slack]["blocks"][1]["text"]["text"]
+    assert "How to fix:" in provider_bodies[slack]["text"]
+    assert provider_bodies[discord]["content"] == "WINDOWKEEPER · WK-101"
+    assert provider_bodies[discord]["allowed_mentions"] == {"parse": []}
+    assert "ACTIVATION_AMBIGUOUS" in provider_bodies[discord]["embeds"][0]["description"]
     stored = await database.call(
         lambda connection: connection.execute(
             "SELECT encrypted_url FROM webhook_destinations WHERE destination_id=?", (destination,)
@@ -78,4 +105,29 @@ async def test_webhook_body_is_immutable_and_destination_is_encrypted(tmp_path: 
         ).fetchall()
     )
     assert [row[0] for row in tested_destinations] == [destination]
+    test_body = await database.call(
+        lambda connection: json.loads(
+            bytes(
+                connection.execute(
+                    "SELECT canonical_body FROM webhook_events WHERE event_id=?", (test_event,)
+                ).fetchone()[0]
+            )
+        )
+    )
+    assert test_body["notification"]["code"] == "WK-900"
+    assert "No action required" in test_body["data"]["recommended_action"]
+    for event_type in ("incident.updated", "incident.resolved"):
+        await dispatcher.emit(
+            event_type,
+            "account:a",
+            {"account_name": "Arina", "summary": event_type, "incident_status": "OPEN"},
+            destination_id=destination,
+        )
+    event_rows = await database.call(
+        lambda connection: connection.execute(
+            "SELECT event_type,canonical_body FROM webhook_events WHERE event_type IN ('incident.updated','incident.resolved')"
+        ).fetchall()
+    )
+    event_codes = {row[0]: json.loads(bytes(row[1]))["notification"]["code"] for row in event_rows}
+    assert event_codes == {"incident.updated": "WK-102", "incident.resolved": "WK-103"}
     await database.close()

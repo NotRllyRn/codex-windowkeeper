@@ -10,7 +10,7 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 - Immediate first-window activation, one in-flight activation per account, and reported-reset scheduling with a duration fallback when an idle reset moves forward on every poll.
 - Activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
-- Durable operations, incidents, SSE updates, sanitized JSONL logs, and generic/Slack/Discord webhooks.
+- Durable operations, incidents, SSE updates, sanitized JSONL logs, and numbered, account-specific generic/Slack/Discord webhooks with causes and recovery steps.
 - SQLite, AES-256-GCM, opaque administrator sessions, CSRF, recent-password confirmation, and managed Codex availability checks.
 
 Windowkeeper does **not** pool quota, route work between accounts, expose a public API, or call undocumented usage endpoints.

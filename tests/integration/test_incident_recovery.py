@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import time
@@ -57,6 +58,18 @@ def test_workspace_failure_opens_and_reauthentication_resolves_incident(
         else:
             raise AssertionError("workspace mismatch did not fail enrollment")
         assert "Authentication Failed" in client.get("/incidents").text
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            opened = json.loads(
+                bytes(
+                    connection.execute(
+                        "SELECT canonical_body FROM webhook_events WHERE event_type='incident.opened' ORDER BY created_at_ms DESC LIMIT 1"
+                    ).fetchone()[0]
+                )
+            )
+        assert opened["notification"]["code"] == "WK-101"
+        assert opened["data"]["account_name"] == "Repairable"
+        assert opened["data"]["cause_code"]
+        assert "Replace or repair credentials" in opened["data"]["recommended_action"]
 
         executable.write_text(
             executable.read_text(encoding="utf-8").replace('"wrong-workspace"', '"workspace-1"'),
@@ -83,6 +96,17 @@ def test_workspace_failure_opens_and_reauthentication_resolves_incident(
         else:
             raise AssertionError("reauthentication did not recover")
         assert "Resolved" in client.get("/incidents").text
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            resolved = json.loads(
+                bytes(
+                    connection.execute(
+                        "SELECT canonical_body FROM webhook_events WHERE event_type='incident.resolved' ORDER BY created_at_ms DESC LIMIT 1"
+                    ).fetchone()[0]
+                )
+            )
+        assert resolved["notification"]["code"] == "WK-103"
+        assert resolved["data"]["incident_status"] == "RESOLVED"
+        assert resolved["data"]["occurrence_count"] == 1
 
 
 def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
