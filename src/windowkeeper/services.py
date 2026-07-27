@@ -913,11 +913,23 @@ class ApplicationServices:
         try:
             await self.database.transaction(work)
         except sqlite3.IntegrityError as error:
-            await self._fail_operation(
-                operation_id, "LOGIN_ALREADY_ACTIVE", "Another sign-in is active"
+            active = await self.database.call(
+                lambda connection: connection.execute(
+                    "SELECT 1 FROM login_attempts WHERE account_id=? AND state IN('CREATED','STARTING_RUNTIME','STARTING_LOGIN','WAITING_FOR_USER','OAUTH_COMPLETED','VERIFYING_ACCOUNT','STARTING_EXPORT_LOGIN','WAITING_FOR_EXPORT_USER','VERIFYING_EXPORT','FORKING_CREDENTIALS','QUIESCING_RUNTIME','CHECKPOINTING_CREDENTIAL','CANCEL_REQUESTED')",
+                    (account["account_id"],),
+                ).fetchone()
             )
-            raise Conflict(
-                "LOGIN_ALREADY_ACTIVE", "Another sign-in is already active for this account"
+            code = "LOGIN_ALREADY_ACTIVE" if active else "LOGIN_STORAGE_CONSTRAINT"
+            summary = (
+                "Another sign-in is active" if active else "Sign-in storage rejected the request"
+            )
+            await self._fail_operation(operation_id, code, summary)
+            if active:
+                raise Conflict(
+                    code, "Another sign-in is already active for this account"
+                ) from error
+            raise WindowkeeperError(
+                code, "Sign-in could not be recorded; apply database migrations and retry", 500
             ) from error
         self._background(
             self._run_login(

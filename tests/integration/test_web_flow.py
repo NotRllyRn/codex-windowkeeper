@@ -1,11 +1,16 @@
+import asyncio
 import json
 import os
+import shutil
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from windowkeeper.config import Settings
+from windowkeeper.database import Database
 from windowkeeper.vault import generate_key
 from windowkeeper.web.app import create_app
 
@@ -205,6 +210,50 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             )
         finally:
             auth_error_marker.unlink(missing_ok=True)
+
+
+def test_manual_token_migration_recovers_v4_schema_drift(tmp_path: Path) -> None:
+    old_migrations = tmp_path / "old-migrations"
+    old_migrations.mkdir()
+    migrations = Path(__file__).parents[2] / "src" / "windowkeeper" / "migrations"
+    for migration in sorted(migrations.glob("00[1-3]_*.sql")):
+        shutil.copy2(migration, old_migrations)
+    database_path = tmp_path / "data" / "windowkeeper.db"
+    database = Database(database_path, old_migrations)
+    database.start()
+    asyncio.run(database.close())
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES(4,'004_manual_token_login','drifted',0)"
+        )
+
+    executable = Path(__file__).parents[1] / "fake_codex.py"
+    os.chmod(executable, 0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        created = client.post(
+            "/accounts",
+            data={
+                "display_name": "Imported",
+                "login_method": "MANUAL_TOKENS",
+                "access_token": "source.access.jwt",
+                "refresh_token": "source-refresh-token",
+                "admin_password": PASSWORD,
+                "csrf_token": client.cookies["wk_csrf"],
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        wait_for(client, "Succeeded", created.headers["location"])
 
 
 def test_manual_tokens_use_the_normal_managed_credential_flow(tmp_path: Path) -> None:
