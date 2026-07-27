@@ -269,7 +269,9 @@ def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:
     )
     with TestClient(create_app(settings)) as client:
         assert client.get("/health/ready").status_code == 503
-        assert client.get("/").status_code == 401
+        unauthenticated = client.get("/", follow_redirects=False)
+        assert unauthenticated.status_code == 303
+        assert unauthenticated.headers["location"] == "/login"
         assert client.post("/login", data={"password": "wrong"}).status_code == 200
         login = client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
         client.cookies.update(login.cookies)
@@ -307,6 +309,8 @@ def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:
         root_path="/windowkeeper",
     )
     with TestClient(create_app(rooted)) as client:
+        rooted_redirect = client.get("/", follow_redirects=False)
+        assert rooted_redirect.headers["location"] == "/windowkeeper/login"
         login_html = client.get("/login").text
         assert 'data-root-path="/windowkeeper"' in login_html
         assert 'href="/windowkeeper/static/app.css"' in login_html

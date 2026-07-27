@@ -371,7 +371,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def dashboard(
         request: Request, variant: str = "orbit", state_filter: str = "", q: str = ""
     ) -> Response:
-        await require_session(request)
+        if not await session_or_none(request):
+            return RedirectResponse("/login", 303)
         selected = variant if variant in VARIANTS else "orbit"
         accounts = await state(request).services.accounts()
         if state_filter:
