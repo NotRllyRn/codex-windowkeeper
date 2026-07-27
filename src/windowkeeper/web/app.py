@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, Header, Request
 from fastapi.exceptions import HTTPException
@@ -260,26 +259,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def headers(request: Request, call_next: Any) -> Response:
-        if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            origin = request.headers.get("origin")
-            configured = app.state.bootstrap_settings.public_base_url
-            base = urlsplit(configured or str(request.base_url))
-            expected_origin = f"{base.scheme}://{base.netloc}"
-            if request.headers.get("sec-fetch-site") == "cross-site" or (
-                origin and origin.rstrip("/") != expected_origin
-            ):
-                return _security_headers(
-                    JSONResponse(
-                        {
-                            "type": "about:blank",
-                            "title": "Request origin rejected",
-                            "status": 403,
-                            "code": "ORIGIN_REJECTED",
-                        },
-                        403,
-                    ),
-                    no_store=True,
-                )
         response = await call_next(request)
         location = response.headers.get("location")
         if (

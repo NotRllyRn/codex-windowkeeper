@@ -2,7 +2,6 @@ import ipaddress
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +19,6 @@ class Settings(BaseSettings):
     port: int = Field(default=8787, ge=1, le=65535)
     timezone: str = "UTC"
     root_path: str = ""
-    public_base_url: str = ""
     trusted_proxies: str = ""
     vault_key_file: Path | None = None
     vault_key: str | None = None
@@ -71,23 +69,6 @@ class Settings(BaseSettings):
         except ValueError as error:
             raise ValueError("trusted proxies must be IP addresses or CIDR ranges") from error
         return value
-
-    @field_validator("public_base_url")
-    @classmethod
-    def valid_public_base_url(cls, value: str) -> str:
-        if not value:
-            return value
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("public_base_url must be an absolute HTTP(S) URL without credentials")
-        return value.rstrip("/")
 
     @field_validator("browser_oauth_callback_ports")
     @classmethod

@@ -33,13 +33,7 @@ def test_secret_file_precedes_environment_value_and_requires_private_mode(tmp_pa
         _read_secret(source, None)
 
 
-def test_network_configuration_is_validated(tmp_path: Path) -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            data_dir=tmp_path / "data",
-            runtime_dir=tmp_path / "run",
-            public_base_url="javascript:alert(1)",
-        )
+def test_trusted_proxy_configuration_is_validated(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         Settings(
             data_dir=tmp_path / "data-2",

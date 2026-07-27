@@ -17,7 +17,7 @@ uv run pip-audit
 uv build
 ```
 
-The automated suite covers migrations, singleton refusal, vault mismatch and rotation, credential/webhook encryption, OAuth callback validation, redaction, CSRF/origin checks, administrator throttling, all five UI layouts, light/dark controls, activation deduplication, tool-item rejection, auth-failure incidents, reauthentication recovery, durable backup/restore, log repair/rotation, and restart reconciliation from upstream turn evidence.
+The automated suite covers migrations, singleton refusal, vault mismatch and rotation, credential/webhook encryption, OAuth callback validation, redaction, CSRF checks, administrator throttling, all five UI layouts, light/dark controls, activation deduplication, tool-item rejection, auth-failure incidents, reauthentication recovery, durable backup/restore, log repair/rotation, and restart reconciliation from upstream turn evidence.
 
 CI uses commit-SHA-pinned actions and publishes multi-architecture images with SBOM, provenance, and GitHub build attestation for version tags.
 

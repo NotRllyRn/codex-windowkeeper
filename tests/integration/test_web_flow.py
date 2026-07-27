@@ -42,7 +42,13 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         assert "default-src 'self'" in login_page.headers["content-security-policy"]
         assert login_page.headers["x-content-type-options"] == "nosniff"
         assert login_page.headers["referrer-policy"] == "no-referrer"
-        login = client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+        login = client.post(
+            "/login",
+            data={"password": PASSWORD},
+            headers={"Origin": "https://external.example"},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
         client.cookies.update(login.cookies)
         csrf = client.cookies["wk_csrf"]
         created = client.post(
@@ -81,14 +87,6 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             client.post(
                 f"/accounts/{account['public_token']}/refresh",
                 data={"csrf_token": "invalid"},
-            ).status_code
-            == 403
-        )
-        assert (
-            client.post(
-                f"/accounts/{account['public_token']}/refresh",
-                data={"csrf_token": csrf},
-                headers={"Origin": "https://attacker.example"},
             ).status_code
             == 403
         )
@@ -149,19 +147,6 @@ def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:
                     "url": "https://example.test",
                     "admin_password": PASSWORD,
                     "csrf_token": "wrong",
-                },
-            ).status_code
-            == 403
-        )
-        assert (
-            client.post(
-                "/settings/webhooks",
-                headers={"Origin": "https://attacker.invalid"},
-                data={
-                    "display_name": "x",
-                    "url": "https://example.test",
-                    "admin_password": PASSWORD,
-                    "csrf_token": client.cookies["wk_csrf"],
                 },
             ).status_code
             == 403

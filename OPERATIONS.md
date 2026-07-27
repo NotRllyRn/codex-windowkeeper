@@ -50,7 +50,7 @@ Rotation is offline and transactional. It re-encrypts active credentials, webhoo
 
 ## Reverse proxy
 
-Bind Windowkeeper to loopback or a private interface. Set `WINDOWKEEPER_PUBLIC_BASE_URL` to the externally visible HTTP(S) origin and `WINDOWKEEPER_TRUSTED_PROXIES` to an explicit comma-separated IP/CIDR allowlist. Wildcards are rejected. Use `WINDOWKEEPER_COOKIE_SECURE=true` for HTTPS. The proxy must preserve the configured root path, enforce request/body limits, and must not log query strings or request bodies. Do not expose Windowkeeper directly to the public internet.
+Bind Windowkeeper to loopback or a private interface. Set `WINDOWKEEPER_TRUSTED_PROXIES` to an explicit comma-separated IP/CIDR allowlist when using a reverse proxy; wildcards are rejected. Use `WINDOWKEEPER_COOKIE_SECURE=true` for HTTPS. The proxy must preserve the configured root path, enforce request/body limits, and must not log query strings or request bodies. Do not expose Windowkeeper directly to the public internet.
 
 ## Incident response
 
