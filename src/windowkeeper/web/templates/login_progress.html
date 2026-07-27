@@ -12,26 +12,22 @@ endblock %} {% block content %}
     <span>1</span>
     <p>Runtime isolated</p>
   </div>
-  <div class="progress-step current" data-managed-step>
+  <div class="progress-step current">
     <span>2</span>
-    <p>Managed authorization</p>
+    <p>One authorization</p>
   </div>
-  {% if started.requires_export_login %}
-  <div class="progress-step" data-export-step>
-    <span>3</span>
-    <p>Export authorization</p>
-  </div>
-  {% endif %}
   <div class="progress-step">
-    <span>{{ 4 if started.requires_export_login else 3 }}</span>
+    <span>3</span>
+    <p>Create both credentials</p>
+  </div>
+  <div class="progress-step">
+    <span>4</span>
     <p>Verify and encrypt</p>
   </div>
   <p class="kicker">{{ account.display_name }}</p>
-  <h1 data-login-heading>Complete managed ChatGPT sign-in</h1>
+  <h1>Complete ChatGPT sign-in once</h1>
   <p class="interaction-status" aria-live="polite">
-    {% if started.requires_export_login %}First of two separate
-    authorizations.{% else %}Starting the official Codex sign-in flow.{% endif
-    %}
+    One approval creates the managed and latest downloadable credentials.
   </p>
   <div class="interaction-loading" data-loading>
     <span></span><span></span><span></span>

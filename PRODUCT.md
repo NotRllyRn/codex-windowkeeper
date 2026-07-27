@@ -20,7 +20,7 @@ Windowkeeper is an evidence-driven, fail-closed activation supervisor. Unlike ac
 
 ## Operating Context
 
-The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll accounts with two same-identity ChatGPT authorizations, download the second authorization as an unmanaged `auth.json`, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
+The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll an account with one ChatGPT authorization, download the latest separately refreshed `auth.json`, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
 
 ## Capabilities and Constraints
 
@@ -28,7 +28,7 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 - The Codex app-server installed and managed by Windowkeeper is the only upstream integration seam.
 - Device-code login is recommended; browser login supports automatic loopback and strict one-time manual callback forwarding.
 - SQLite is the durable store; one process owns one data directory.
-- Each new account has one managed credential bundle and one separately authorized unmanaged auth export.
+- One authorization is refreshed twice into managed and downloadable credential bundles; successful refreshes atomically replace both.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.
 - One accepted activation at most for each account and window key; ambiguous submission blocks replay.
 - FastAPI, Jinja, native JavaScript, native SSE, Click, and no Node build or client router.

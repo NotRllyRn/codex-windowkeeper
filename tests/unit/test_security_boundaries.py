@@ -10,6 +10,7 @@ from windowkeeper.services import (
     ApplicationServices,
     browser_contract,
     validate_callback,
+    verify_identity,
     verify_same_identity,
 )
 
@@ -46,7 +47,7 @@ async def test_activation_rejects_any_tool_item() -> None:
     assert caught.value.code == "ACTIVATION_SAFETY_VIOLATION"
 
 
-def test_export_login_must_match_the_managed_identity() -> None:
+def test_forked_credentials_must_match_the_managed_identity() -> None:
     managed = {"account": {"email": "Owner@Example.test", "workspaceId": "workspace-1"}}
     verify_same_identity(
         managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-1"}}
@@ -60,6 +61,12 @@ def test_export_login_must_match_the_managed_identity() -> None:
         verify_same_identity(
             managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-2"}}
         )
+    with pytest.raises(WindowkeeperError) as reauthentication:
+        verify_identity(
+            {"upstream_email": "owner@example.test"},
+            {"account": {"email": "other@example.test"}},
+        )
+    assert reauthentication.value.code == "AUTH_IDENTITY_MISMATCH"
 
 
 def test_redaction_is_recursive_and_sanitizes_urls() -> None:

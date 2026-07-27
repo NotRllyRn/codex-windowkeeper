@@ -53,8 +53,8 @@ class CodexAdapter:
     async def cancel_login(self, login_id: str) -> None:
         await self.client.request("account/login/cancel", {"loginId": login_id})
 
-    async def account(self) -> dict[str, Any]:
-        result, _ = await self.client.request("account/read", {})
+    async def account(self, refresh_token: bool = False) -> dict[str, Any]:
+        result, _ = await self.client.request("account/read", {"refreshToken": refresh_token})
         return result
 
     async def rate_limits(self) -> dict[str, Any]:

@@ -74,9 +74,14 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         dashboard = client.get("/api/internal/v1/dashboard").json()
         account = dashboard["data"][0]
         assert account["short_percent"] == 22
-        traces = list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
-        assert len(traces) == 1
-        assert traces[0].read_text(encoding="utf-8").splitlines() == ["login-1", "login-2"]
+        login_traces = list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
+        refresh_traces = list((tmp_path / "run" / "accounts").glob("*/.fake-refreshes"))
+        assert len(login_traces) == len(refresh_traces) == 1
+        assert login_traces[0].read_text(encoding="utf-8").splitlines() == ["login-1"]
+        assert refresh_traces[0].read_text(encoding="utf-8").splitlines() == [
+            "refresh-1",
+            "refresh-2",
+        ]
         for path in (
             f"/accounts/{account['public_token']}",
             "/accounts/new",
@@ -110,7 +115,9 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         assert auth_export.headers["content-disposition"] == 'attachment; filename="auth.json"'
         assert auth_export.headers["cache-control"] == "no-store, max-age=0"
         assert auth_export.headers["content-type"] == "application/json"
-        assert json.loads(auth_export.content)["tokens"]["refresh_token"] == "refresh-2"  # noqa: S105
+        assert (
+            json.loads(auth_export.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
+        )
         reauthenticated = client.post(
             f"/accounts/{account['public_token']}/reauthenticate",
             data={
@@ -121,14 +128,19 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         )
         assert reauthenticated.status_code == 200
         deadline = time.monotonic() + 8
-        while len(traces[0].read_text(encoding="utf-8").splitlines()) < 3:
+        while len(login_traces[0].read_text(encoding="utf-8").splitlines()) < 2:
             assert time.monotonic() < deadline
             time.sleep(0.1)
-        unchanged_export = client.post(
+        while len(refresh_traces[0].read_text(encoding="utf-8").splitlines()) < 4:
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+        rotated_export = client.post(
             export_path,
             data={"admin_password": PASSWORD, "csrf_token": csrf},
         )
-        assert json.loads(unchanged_export.content)["tokens"]["refresh_token"] == "refresh-2"  # noqa: S105
+        assert (
+            json.loads(rotated_export.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+        )
         assert (
             client.post(
                 f"/accounts/{account['public_token']}/refresh",
@@ -142,6 +154,14 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             follow_redirects=False,
         )
         assert refresh.status_code == 303
+        wait_for(client, "Succeeded", refresh.headers["location"])
+        latest_export = client.post(
+            export_path,
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert (
+            json.loads(latest_export.content)["tokens"]["refresh_token"] == "fork-refresh-6"  # noqa: S105
+        )
         activation = client.post(
             f"/accounts/{account['public_token']}/activate",
             data={"csrf_token": csrf},
@@ -149,6 +169,14 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         )
         assert activation.status_code == 303
         wait_for(client, "Succeeded", activation.headers["location"])
+        post_activation_export = client.post(
+            export_path,
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert (
+            json.loads(post_activation_export.content)["tokens"]["refresh_token"]
+            == "fork-refresh-6"  # noqa: S105
+        )
         duplicate = client.post(
             f"/accounts/{account['public_token']}/activate",
             data={"csrf_token": csrf},
@@ -168,14 +196,19 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             wait_for(client, "Failed", failed_refresh.headers["location"])
             wait_for(client, "Action Required")
             wait_for(client, "authentication must be renewed", "/incidents")
+            retained_export = client.post(
+                export_path,
+                data={"admin_password": PASSWORD, "csrf_token": csrf},
+            )
+            assert (
+                json.loads(retained_export.content)["tokens"]["refresh_token"] == "fork-refresh-6"  # noqa: S105
+            )
         finally:
             auth_error_marker.unlink(missing_ok=True)
 
 
-def test_managed_refresh_is_checkpointed_across_restart(tmp_path: Path) -> None:
+def test_latest_auth_export_survives_restart_and_activation(tmp_path: Path) -> None:
     executable = Path(__file__).parents[1] / "fake_codex.py"
-    refresh_marker = executable.with_suffix(".refresh-token")
-    expected_marker = executable.with_suffix(".expect-token")
     os.chmod(executable, 0o700)
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -187,50 +220,44 @@ def test_managed_refresh_is_checkpointed_across_restart(tmp_path: Path) -> None:
         activation_safety_delay_seconds=1,
         activation_jitter_max_seconds=0,
     )
-    try:
-        with TestClient(create_app(settings)) as client:
-            login = client.post("/login", data={"password": PASSWORD})
-            client.cookies.update(login.cookies)
-            csrf = client.cookies["wk_csrf"]
-            created = client.post(
-                "/accounts",
-                data={
-                    "display_name": "Checkpointed",
-                    "login_method": "CHATGPT_DEVICE_CODE",
-                    "admin_password": PASSWORD,
-                    "csrf_token": csrf,
-                },
-            )
-            assert created.status_code == 200
-            wait_for(client, "Checkpointed")
-            wait_for(client, "22%")
-            account = client.get("/api/internal/v1/dashboard").json()["data"][0]
-            refresh_marker.touch()
-            refreshed = client.post(
-                f"/accounts/{account['public_token']}/refresh",
-                data={"csrf_token": csrf},
-                follow_redirects=False,
-            )
-            assert refreshed.status_code == 303
-            wait_for(client, "Succeeded", refreshed.headers["location"])
-            refresh_marker.unlink()
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        created = client.post(
+            "/accounts",
+            data={
+                "display_name": "Persisted export",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        assert created.status_code == 200
+        wait_for(client, "22%")
+        account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+        refreshed = client.post(
+            f"/accounts/{account['public_token']}/refresh",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        wait_for(client, "Succeeded", refreshed.headers["location"])
 
-        expected_marker.write_text("refresh-1-rotated", encoding="utf-8")
-        with TestClient(create_app(settings)) as client:
-            login = client.post("/login", data={"password": PASSWORD})
-            client.cookies.update(login.cookies)
-            csrf = client.cookies["wk_csrf"]
-            account = client.get("/api/internal/v1/dashboard").json()["data"][0]
-            activation = client.post(
-                f"/accounts/{account['public_token']}/activate",
-                data={"csrf_token": csrf},
-                follow_redirects=False,
-            )
-            assert activation.status_code == 303
-            wait_for(client, "Succeeded", activation.headers["location"])
-    finally:
-        refresh_marker.unlink(missing_ok=True)
-        expected_marker.unlink(missing_ok=True)
+    export_path = f"/accounts/{account['public_token']}/auth-export"
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        persisted = client.post(export_path, data={"admin_password": PASSWORD, "csrf_token": csrf})
+        assert json.loads(persisted.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+        activation = client.post(
+            f"/accounts/{account['public_token']}/activate",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        wait_for(client, "Succeeded", activation.headers["location"])
+        rotated = client.post(export_path, data={"admin_password": PASSWORD, "csrf_token": csrf})
+        assert json.loads(rotated.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
 
 
 def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:

@@ -121,27 +121,11 @@ if (loginProgress) {
 	const nonce = loginProgress.dataset.nonce;
 	const csrf = loginProgress.dataset.csrf;
 	const status = loginProgress.querySelector(".interaction-status");
-	const heading = loginProgress.querySelector("[data-login-heading]");
 	const loading = loginProgress.querySelector("[data-loading]");
 	let interaction;
-	let phase = "managed";
-
-	const resetInteraction = () => {
-		loginProgress
-			.querySelectorAll("[data-device], [data-browser]")
-			.forEach((panel) => (panel.hidden = true));
-		loginProgress.querySelector("[data-forward]").disabled = false;
-		loginProgress.querySelector("#callback_url").value = "";
-		loading.hidden = false;
-	};
 
 	const showInteraction = (data) => {
 		interaction = data;
-		phase = data.purpose;
-		heading.textContent =
-			phase === "export"
-				? "Complete second sign-in for auth.json"
-				: "Complete managed ChatGPT sign-in";
 		loading.hidden = true;
 		if (data.method === "CHATGPT_DEVICE_CODE") {
 			const panel = loginProgress.querySelector("[data-device]");
@@ -149,17 +133,12 @@ if (loginProgress) {
 			panel.querySelector("[data-verification]").href = data.verification_url;
 			panel.querySelector("[data-code]").textContent = data.user_code;
 			status.textContent =
-				phase === "export"
-					? "Enter the second one-time code for your unmanaged export."
-					: "Enter the one-time code. Windowkeeper never logs it.";
+				"Enter the one-time code. Windowkeeper never logs it.";
 		} else {
 			const panel = loginProgress.querySelector("[data-browser]");
 			panel.hidden = false;
 			panel.querySelector("[data-authorization]").href = data.authorization_url;
-			status.textContent =
-				phase === "export"
-					? "Authorize the same account again for your unmanaged export."
-					: "Authorize the account in a separate browser tab.";
+			status.textContent = "Authorize the account in a separate browser tab.";
 		}
 	};
 
@@ -251,19 +230,12 @@ if (loginProgress) {
 			return;
 		}
 		if (update.attempt_id !== attempt) return;
-		if (update.state === "WAITING_FOR_EXPORT_USER" && phase !== "export") {
-			phase = "export";
-			interaction = undefined;
+		if (update.state === "FORKING_CREDENTIALS") {
+			status.textContent = "Creating managed and downloadable credentials.";
 			loginProgress
-				.querySelector("[data-managed-step]")
-				.classList.remove("current");
-			loginProgress
-				.querySelector("[data-export-step]")
-				.classList.add("current");
-			resetInteraction();
-			status.textContent =
-				"Managed sign-in complete. Starting the second authorization.";
-			pollInteraction();
+				.querySelectorAll("[data-device], [data-browser]")
+				.forEach((panel) => (panel.hidden = true));
+			loading.hidden = false;
 		}
 		if (update.state === "COMPLETED")
 			location.assign(appPath(`/accounts/${account}`));

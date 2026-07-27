@@ -30,6 +30,7 @@ for line in sys.stdin:
     except json.JSONDecodeError:
         continue
     method = message.get("method")
+    params = message.get("params") or {}
     request_id = message.get("id")
     if request_id is None:
         continue
@@ -79,6 +80,22 @@ for line in sys.stdin:
     elif method == "account/login/cancel":
         send({"id": request_id, "result": {}})
     elif method == "account/read":
+        if params.get("refreshToken"):
+            trace = home.parents[1] / ".fake-refreshes"
+            refresh_number = (
+                len(trace.read_text(encoding="utf-8").splitlines()) + 1 if trace.exists() else 1
+            )
+            with trace.open("a", encoding="utf-8") as stream:
+                stream.write(f"refresh-{refresh_number}\n")
+            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+            auth["tokens"] |= {
+                "id_token": f"fork-id-{refresh_number}",
+                "access_token": f"fork-access-{refresh_number}",
+                "refresh_token": f"fork-refresh-{refresh_number}",
+            }
+            (home / "auth.json").write_text(
+                json.dumps(auth, separators=(",", ":")), encoding="utf-8"
+            )
         send(
             {
                 "id": request_id,
@@ -95,12 +112,6 @@ for line in sys.stdin:
         if marker(".auth-error"):
             send({"id": request_id, "error": {"code": "unauthorized"}})
             continue
-        if marker(".refresh-token"):
-            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
-            auth["tokens"]["refresh_token"] += "-rotated"
-            (home / "auth.json").write_text(
-                json.dumps(auth, separators=(",", ":")), encoding="utf-8"
-            )
         send(
             {
                 "id": request_id,
@@ -127,12 +138,6 @@ for line in sys.stdin:
             }
         )
     elif method == "thread/start":
-        expected_path = Path(__file__).with_suffix(".expect-token")
-        if expected_path.exists():
-            auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
-            if auth["tokens"]["refresh_token"] != expected_path.read_text(encoding="utf-8"):
-                send({"id": request_id, "error": {"code": "stale_refresh_token"}})
-                continue
         send({"id": request_id, "result": {"thread": {"id": "thread-1"}}})
     elif method == "turn/start":
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})

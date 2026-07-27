@@ -22,9 +22,9 @@ Device code is recommended for local, NAS, Docker, and SSH deployments. Browser 
 - `host-loopback`: receive the validated localhost callback directly; only use on a Linux host where Windowkeeper owns the pinned callback ports.
 - `disabled`: prohibit browser OAuth while retaining device-code sign-in.
 
-New-account enrollment requires two separate approvals for the same ChatGPT identity. The first credential is managed by Windowkeeper; the second is retained encrypted and downloadable as `auth.json`, but is never used or refreshed by Windowkeeper. Reauthentication replaces only the managed credential.
+Enrollment and reauthentication require one ChatGPT approval. Windowkeeper immediately asks the pinned Codex app-server to refresh that source credential twice: one result becomes the managed bundle and the other becomes the latest downloadable `auth.json`. Every successful usage refresh repeats this two-way refresh and atomically replaces both local bundles; activation uses the resulting managed bundle.
 
-Windowkeeper validates HTTPS, callback host/path/port, OAuth state, response size, and account/workspace identity before promoting credentials. Failed enrollment credentials are not promoted, and failed replacement credentials never replace the active bundle.
+This relies on OpenAI's limited refresh-token reuse grace period. Windowkeeper validates that both outputs rotated and match the same account/workspace. If either exchange fails, neither stored bundle is replaced. Replacing the local download does not remotely revoke copies downloaded earlier.
 
 ## Back up and restore
 
@@ -48,7 +48,7 @@ windowkeeper vault rotate \
 windowkeeper vault verify --key-file /secure/windowkeeper-vault.next
 ```
 
-Rotation is offline and transactional. It re-encrypts managed credentials, unmanaged auth exports, webhook URLs, webhook signing secrets, and the sentinel. Replace the configured key-file reference only after verification. Keep the old key in protected recovery storage until the new service has passed readiness and account refresh checks.
+Rotation is offline and transactional. It re-encrypts managed credentials, downloadable auth bundles, webhook URLs, webhook signing secrets, and the sentinel. Replace the configured key-file reference only after verification. Keep the old key in protected recovery storage until the new service has passed readiness and account refresh checks.
 
 ## Reverse proxy
 

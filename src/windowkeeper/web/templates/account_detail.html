@@ -86,12 +86,12 @@ Windowkeeper{% endblock %} {% block content %}
   </article>
 </section>
 <section class="detail-section reauth-panel">
-  <h2>Unmanaged auth export</h2>
+  <h2>Latest downloadable credentials</h2>
   {% if detail.auth_export.available %}
   <p class="subtle">
-    This separately authorized <code>auth.json</code> is not used or refreshed
-    by Windowkeeper. Its tokens share this account's upstream quota and may not
-    have independent revocation semantics.
+    This <code>auth.json</code> is replaced after every successful refresh.
+    Windowkeeper never uses it. Previously downloaded copies are not remotely
+    revoked and all copies share this account's upstream quota.
   </p>
   <form
     class="account-form"
@@ -106,12 +106,14 @@ Windowkeeper{% endblock %} {% block content %}
       type="password"
       required
       autocomplete="current-password"
-    /><button class="primary-button" type="submit">Download auth.json</button>
+    /><button class="primary-button" type="submit">
+      Download latest auth.json
+    </button>
   </form>
   {% else %}
   <p class="subtle">
-    No unmanaged export is available. New-account enrollment creates one after
-    its second ChatGPT authorization.
+    No downloadable credential is available. Complete one ChatGPT sign-in to
+    create it.
   </p>
   {% endif %}
 </section>

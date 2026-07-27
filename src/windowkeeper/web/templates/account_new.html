@@ -5,9 +5,8 @@
   <p class="kicker">New credential lineage</p>
   <h1>Add an authorized account</h1>
   <p>
-    Enrollment uses two separate ChatGPT authorizations: one managed credential
-    for Windowkeeper and one unmanaged <code>auth.json</code> for you to
-    download.
+    One ChatGPT authorization creates a managed credential for Windowkeeper and
+    a separately refreshed <code>auth.json</code> for you to download.
   </p>
 </section>
 {% if not vault_configured %}
@@ -81,8 +80,8 @@
       autocomplete="current-password"
     />
     <p class="field-help">
-      Credential enrollment requires recent administrator reauthentication and
-      two approvals for the same ChatGPT identity.
+      Credential enrollment requires administrator reauthentication and one
+      ChatGPT approval.
     </p>
   </fieldset>
   <div class="form-actions">

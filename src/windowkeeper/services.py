@@ -171,6 +171,13 @@ def verify_identity(account: dict[str, Any], identity: dict[str, Any]) -> dict[s
         raise WindowkeeperError(
             "AUTH_IDENTITY_UNVERIFIED", "Codex did not return a verifiable ChatGPT identity", 409
         )
+    expected_email = account.get("upstream_email")
+    if expected_email and str(observed["email"]).casefold() != str(expected_email).casefold():
+        raise WindowkeeperError(
+            "AUTH_IDENTITY_MISMATCH",
+            "The authenticated ChatGPT identity does not match this account",
+            409,
+        )
     expected_workspace = account.get("workspace_constraint")
     observed_workspace = (
         observed.get("workspaceId")
@@ -268,7 +275,6 @@ class StoredInteraction:
     session_hash: bytes
     nonce_hash: bytes
     interaction: LoginInteraction
-    purpose: str
     contract: BrowserContract | None = None
     consumed: bool = False
 
@@ -298,6 +304,7 @@ class ApplicationServices:
         self._auth_semaphore = asyncio.Semaphore(settings.auth_concurrency)
         self._activation_semaphore = asyncio.Semaphore(settings.activation_concurrency)
         self._browser_login_lock = asyncio.Lock()
+        self._credential_locks: dict[str, asyncio.Lock] = {}
         self.log = logging.getLogger("windowkeeper.services")
 
     def _background(self, coroutine: Any) -> None:
@@ -396,7 +403,6 @@ class ApplicationServices:
             runtime = await self.runtime.use(account["account_id"], payload)
             async with runtime.lock:
                 evidence = await runtime.adapter.read_thread(str(thread_id))
-                await self._checkpoint_credentials(account["account_id"], payload, runtime)
             reconciled = _reconciled_result(
                 evidence,
                 str(attempt["upstream_turn_id"]) if attempt.get("upstream_turn_id") else None,
@@ -845,7 +851,7 @@ class ApplicationServices:
 
     async def start_login(
         self, public: str, method: LoginMethod, session_token: str
-    ) -> dict[str, str | bool]:
+    ) -> dict[str, str]:
         account = await self._account_row(public)
         if method == LoginMethod.CHATGPT_BROWSER and self.settings.browser_oauth_mode == "disabled":
             raise Conflict(
@@ -903,7 +909,6 @@ class ApplicationServices:
             "operation_id": operation_id,
             "login_attempt_id": attempt_id,
             "interaction_nonce": nonce,
-            "requires_export_login": account["lifecycle_state"] == "ENROLLING",
         }
 
     async def _capture_login(
@@ -914,21 +919,11 @@ class ApplicationServices:
         method: LoginMethod,
         session_token: str,
         nonce: str,
-        purpose: str,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        export = purpose == "export"
-        start_state = "STARTING_EXPORT_LOGIN" if export else "STARTING_LOGIN"
-        wait_state = "WAITING_FOR_EXPORT_USER" if export else "WAITING_FOR_USER"
-        verify_state = "VERIFYING_EXPORT" if export else "VERIFYING_ACCOUNT"
-        summary = (
-            "Complete the second sign-in for downloadable auth.json"
-            if export
-            else "Complete the managed account sign-in"
-        )
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         await self.runtime.stop(account["account_id"])
         runtime = await self.runtime.use(account["account_id"])
         async with runtime.lock:
-            await self._login_state(attempt_id, start_state)
+            await self._login_state(attempt_id, "STARTING_LOGIN")
             interaction = await runtime.adapter.start_login(method)
         contract = (
             browser_contract(
@@ -945,20 +940,14 @@ class ApplicationServices:
             else ("MANUAL_FORWARD" if contract else None)
         )
         self.interactions[attempt_id] = StoredInteraction(
-            attempt_id,
-            digest(session_token),
-            digest(nonce),
-            interaction,
-            purpose,
-            contract,
+            attempt_id, digest(session_token), digest(nonce), interaction, contract
         )
         now = self.clock.now_ms()
 
         def ready(connection: sqlite3.Connection) -> None:
             connection.execute(
-                "UPDATE login_attempts SET state=?,upstream_login_id=?,callback_port=?,callback_mode=?,started_at_ms=?,updated_at_ms=? WHERE login_attempt_id=?",
+                "UPDATE login_attempts SET state='WAITING_FOR_USER',upstream_login_id=?,callback_port=?,callback_mode=?,started_at_ms=?,updated_at_ms=? WHERE login_attempt_id=?",
                 (
-                    wait_state,
                     interaction.login_id,
                     contract.port if contract else None,
                     callback_mode,
@@ -968,8 +957,8 @@ class ApplicationServices:
                 ),
             )
             connection.execute(
-                "UPDATE operations SET state='WAITING_FOR_USER',progress_code=?,progress_summary=?,state_version=state_version+1 WHERE operation_id=?",
-                (wait_state, summary, operation_id),
+                "UPDATE operations SET state='WAITING_FOR_USER',progress_code='WAITING_FOR_USER',progress_summary='Complete ChatGPT sign-in',state_version=state_version+1 WHERE operation_id=?",
+                (operation_id,),
             )
 
         await self.database.transaction(ready)
@@ -978,8 +967,7 @@ class ApplicationServices:
             {
                 "attempt_id": attempt_id,
                 "account_id": account["public_token"],
-                "state": wait_state,
-                "purpose": purpose,
+                "state": "WAITING_FOR_USER",
                 "interaction_ready": True,
             },
         )
@@ -987,11 +975,10 @@ class ApplicationServices:
             runtime.adapter.client.notifications(), interaction.login_id
         )
         self.interactions.pop(attempt_id, None)
-        await self._login_state(attempt_id, verify_state)
+        await self._login_state(attempt_id, "VERIFYING_ACCOUNT")
         async with runtime.lock:
             identity = await runtime.adapter.account()
             verify_identity(account, identity)
-            usage = {} if export else await runtime.adapter.rate_limits()
             await runtime.client.close()
             payload = self.vault.capture(
                 runtime.codex_home,
@@ -999,7 +986,7 @@ class ApplicationServices:
                 account.get("workspace_constraint"),
             )
         await self.runtime.stop(account["account_id"])
-        return identity, usage, payload
+        return identity, payload
 
     async def _run_login(
         self,
@@ -1017,26 +1004,31 @@ class ApplicationServices:
                     operation_id, "RUNNING", "STARTING_RUNTIME", "Starting isolated Codex runtime"
                 )
                 await self._login_state(attempt_id, "STARTING_RUNTIME")
-                identity, usage, managed_payload = await self._capture_login(
-                    account, operation_id, attempt_id, method, session_token, nonce, "managed"
+                identity, source = await self._capture_login(
+                    account, operation_id, attempt_id, method, session_token, nonce
                 )
-                export_envelope = None
-                if account["lifecycle_state"] == "ENROLLING":
-                    export_identity, _, export_payload = await self._capture_login(
-                        account, operation_id, attempt_id, method, session_token, nonce, "export"
+                await self._login_state(attempt_id, "FORKING_CREDENTIALS")
+                self.events.publish(
+                    "login.updated",
+                    {
+                        "attempt_id": attempt_id,
+                        "account_id": account["public_token"],
+                        "state": "FORKING_CREDENTIALS",
+                    },
+                )
+                async with self._credential_lock(account["account_id"]):
+                    managed, exported = await self._fork_credentials(account, source)
+                    usage = await self._read_usage(account["account_id"], managed)
+                    await self._commit_login(
+                        account,
+                        operation_id,
+                        attempt_id,
+                        method,
+                        identity,
+                        usage,
+                        self.vault.encrypt(account["account_id"], managed),
+                        self.vault.encrypt(account["account_id"], exported),
                     )
-                    verify_same_identity(identity, export_identity)
-                    export_envelope = self.vault.encrypt(account["account_id"], export_payload)
-                await self._commit_login(
-                    account,
-                    operation_id,
-                    attempt_id,
-                    method,
-                    identity,
-                    usage,
-                    self.vault.encrypt(account["account_id"], managed_payload),
-                    export_envelope,
-                )
         except asyncio.CancelledError as cancellation:
             del cancellation
             await self._fail_login(
@@ -1051,6 +1043,7 @@ class ApplicationServices:
             action_required = error.code in {
                 "WORKSPACE_MISMATCH",
                 "AUTH_IDENTITY_UNVERIFIED",
+                "AUTH_IDENTITY_MISMATCH",
                 "AUTH_EXPORT_IDENTITY_MISMATCH",
                 "CODEX_BROWSER_AUTH_CONTRACT_CHANGED",
             }
@@ -1099,7 +1092,6 @@ class ApplicationServices:
         interaction = stored.interaction
         return {
             "attempt_id": attempt_id,
-            "purpose": stored.purpose,
             "method": interaction.method.value,
             "authorization_url": interaction.auth_url.reveal() if interaction.auth_url else None,
             "verification_url": interaction.verification_url.reveal()
@@ -1210,48 +1202,94 @@ class ApplicationServices:
             raise Conflict("AUTH_REQUIRED", "The account must be authenticated first")
         return payload
 
-    async def _checkpoint_credentials(
-        self, account_id: str, previous: dict[str, Any], runtime: Any
-    ) -> None:
-        current = self.vault.capture(
-            runtime.codex_home, self.settings.codex_version, previous.get("workspace_constraint")
-        )
-        if current == previous:
-            return
-        envelope = self.vault.encrypt(account_id, current)
-        now = self.clock.now_ms()
+    def _token_pair(self, payload: dict[str, Any]) -> tuple[str, str]:
+        try:
+            value = json.loads(self.vault.auth_json(payload))
+        except (TypeError, ValueError) as error:
+            raise WindowkeeperError(
+                "CODEX_REFRESH_CONTRACT_CHANGED", "Codex auth.json is not readable"
+            ) from error
+        tokens = value.get("tokens") or value
+        access = tokens.get("access_token")
+        refresh = tokens.get("refresh_token")
+        if not isinstance(access, str) or not isinstance(refresh, str) or not access or not refresh:
+            raise WindowkeeperError(
+                "CODEX_REFRESH_CONTRACT_CHANGED", "Codex auth.json has no refreshable token pair"
+            )
+        return access, refresh
 
-        def work(connection: sqlite3.Connection) -> None:
-            row = connection.execute(
-                "SELECT * FROM credential_bundles WHERE account_id=? AND state='ACTIVE'",
-                (account_id,),
-            ).fetchone()
-            if not row:
-                return
-            stored = self.vault.decrypt(
-                Envelope(
-                    row["bundle_id"],
-                    row["account_id"],
-                    row["key_id"],
-                    row["nonce"],
-                    row["ciphertext"],
-                    row["aad"],
-                    row["payload_schema_version"],
-                    row["envelope_version"],
+    async def _refresh_payload(
+        self, account: dict[str, Any], source: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        source_refresh = self._token_pair(source)[1]
+        await self.runtime.stop(account["account_id"])
+        runtime = await self.runtime.use(account["account_id"], source)
+        try:
+            async with runtime.lock:
+                identity = await runtime.adapter.account(refresh_token=True)
+                verify_identity(account, identity)
+                await runtime.client.close()
+                refreshed = self.vault.capture(
+                    runtime.codex_home,
+                    self.settings.codex_version,
+                    source.get("workspace_constraint"),
                 )
+        finally:
+            await self.runtime.stop(account["account_id"])
+        if self._token_pair(refreshed)[1] == source_refresh:
+            raise WindowkeeperError(
+                "CODEX_TOKEN_NOT_ROTATED", "Codex did not rotate the OAuth credential"
             )
-            if stored != previous:
-                return
-            connection.execute(
-                "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE bundle_id=?",
-                (now, row["bundle_id"]),
+        return identity, refreshed
+
+    def _credential_lock(self, account_id: str) -> asyncio.Lock:
+        return self._credential_locks.setdefault(account_id, asyncio.Lock())
+
+    async def _fork_credentials(
+        self, account: dict[str, Any], source: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        managed_identity, managed = await self._refresh_payload(account, source)
+        exported_identity, exported = await self._refresh_payload(account, source)
+        verify_same_identity(managed_identity, exported_identity)
+        if self._token_pair(managed)[1] == self._token_pair(exported)[1]:
+            raise WindowkeeperError(
+                "CODEX_TOKEN_FORK_FAILED", "Codex returned the same OAuth credential twice"
             )
+        return managed, exported
+
+    async def _read_usage(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        runtime = await self.runtime.use(account_id, payload)
+        try:
+            async with runtime.lock:
+                result = await runtime.adapter.rate_limits()
+        except Exception:
+            await self.runtime.stop(account_id)
+            raise
+        self.runtime.release_later(account_id)
+        return dict(result)
+
+    def _replace_bundle_rows(
+        self,
+        connection: sqlite3.Connection,
+        managed: Envelope,
+        exported: Envelope,
+        now: int,
+    ) -> None:
+        connection.execute(
+            "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE account_id=? AND state='ACTIVE'",
+            (now, managed.account_id),
+        )
+        connection.execute(
+            "DELETE FROM credential_bundles WHERE account_id=? AND state='EXPORT'",
+            (managed.account_id,),
+        )
+        for envelope, state in ((managed, "ACTIVE"), (exported, "EXPORT")):
             connection.execute(
                 "INSERT INTO credential_bundles VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     envelope.bundle_id,
                     envelope.account_id,
-                    "ACTIVE",
+                    state,
                     envelope.envelope_version,
                     envelope.payload_schema_version,
                     envelope.key_id,
@@ -1260,18 +1298,16 @@ class ApplicationServices:
                     envelope.aad,
                     self.settings.codex_version,
                     now,
-                    now,
+                    now if state == "ACTIVE" else None,
                     None,
                 ),
             )
-
-        await self.database.transaction(work)
 
     async def export_auth_json(self, public: str) -> bytes:
         account = await self._account_row(public)
         payload = await self._bundle_payload(account["account_id"], "EXPORT")
         if not payload:
-            raise Conflict("AUTH_EXPORT_UNAVAILABLE", "No unmanaged auth export is available")
+            raise Conflict("AUTH_EXPORT_UNAVAILABLE", "No downloadable auth.json is available")
         return self.vault.auth_json(payload)
 
     async def refresh(self, public: str, trigger: str = "USER") -> str:
@@ -1321,14 +1357,18 @@ class ApplicationServices:
         )
         now = self.clock.now_ms()
         try:
-            payload = await self._credential_payload(account["account_id"])
-            async with self._usage_semaphore:
-                runtime = await self.runtime.use(account["account_id"], payload)
-                async with runtime.lock:
-                    raw = await runtime.adapter.rate_limits()
-                    await self._checkpoint_credentials(account["account_id"], payload, runtime)
-                self.runtime.release_later(account["account_id"])
-            await self._commit_usage(account, raw, operation_id, started)
+            async with self._usage_semaphore, self._credential_lock(account["account_id"]):
+                source = await self._credential_payload(account["account_id"])
+                managed, exported = await self._fork_credentials(account, source)
+                raw = await self._read_usage(account["account_id"], managed)
+                await self._commit_usage(
+                    account,
+                    raw,
+                    operation_id,
+                    started,
+                    self.vault.encrypt(account["account_id"], managed),
+                    self.vault.encrypt(account["account_id"], exported),
+                )
         except Exception as error:
             duration = _integer((self.clock.monotonic() - started) * 1000)
             snapshot_id = new_id()
@@ -1394,7 +1434,13 @@ class ApplicationServices:
             )
 
     async def _commit_usage(
-        self, account: dict[str, Any], raw: dict[str, Any], operation_id: str, started: float
+        self,
+        account: dict[str, Any],
+        raw: dict[str, Any],
+        operation_id: str,
+        started: float,
+        managed: Envelope | None = None,
+        exported: Envelope | None = None,
     ) -> None:
         normalized = normalize_usage(raw)
         now = self.clock.now_ms()
@@ -1404,6 +1450,8 @@ class ApplicationServices:
         weekly = normalized.weekly
 
         def work(connection: sqlite3.Connection) -> None:
+            if managed and exported:
+                self._replace_bundle_rows(connection, managed, exported, now)
             connection.execute(
                 "INSERT INTO usage_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -1727,8 +1775,8 @@ class ApplicationServices:
                 raise Conflict(
                     "ACTIVATION_NOT_ELIGIBLE", "Account became ineligible before activation"
                 )
-            payload = await self._credential_payload(account["account_id"])
-            async with self._activation_semaphore:
+            async with self._activation_semaphore, self._credential_lock(account["account_id"]):
+                payload = await self._credential_payload(account["account_id"])
                 runtime = await self.runtime.use(account["account_id"], payload)
                 async with runtime.lock:
                     thread_id = await runtime.adapter.create_thread(str(runtime.workspace))
@@ -1785,7 +1833,6 @@ class ApplicationServices:
                     await self._accept_turn(activation_id, turn_id)
                     result = await self._await_turn(runtime.adapter.client.notifications(), turn_id)
                     await self._complete_activation(account, activation_id, operation_id, result)
-                    await self._checkpoint_credentials(account["account_id"], payload, runtime)
                 self.runtime.release_later(account["account_id"])
         except Exception as error:
             not_eligible = False
@@ -2221,7 +2268,7 @@ class ApplicationServices:
         identity: dict[str, Any],
         usage_raw: dict[str, Any],
         envelope: Envelope,
-        export_envelope: Envelope | None = None,
+        export_envelope: Envelope,
     ) -> None:
         now = self.clock.now_ms()
         account_info = identity.get("account") or identity
@@ -2229,37 +2276,7 @@ class ApplicationServices:
         plan = account_info.get("planType")
 
         def work(connection: sqlite3.Connection) -> None:
-            def insert_bundle(value: Envelope, state: str) -> None:
-                connection.execute(
-                    "INSERT INTO credential_bundles VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        value.bundle_id,
-                        value.account_id,
-                        state,
-                        value.envelope_version,
-                        value.payload_schema_version,
-                        value.key_id,
-                        value.nonce,
-                        value.ciphertext,
-                        value.aad,
-                        self.settings.codex_version,
-                        now,
-                        now if state == "ACTIVE" else None,
-                        None,
-                    ),
-                )
-
-            connection.execute(
-                "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE account_id=? AND state='ACTIVE'",
-                (now, account["account_id"]),
-            )
-            insert_bundle(envelope, "ACTIVE")
-            if export_envelope:
-                connection.execute(
-                    "DELETE FROM credential_bundles WHERE account_id=? AND state='EXPORT'",
-                    (account["account_id"],),
-                )
-                insert_bundle(export_envelope, "EXPORT")
+            self._replace_bundle_rows(connection, envelope, export_envelope, now)
             connection.execute(
                 "UPDATE accounts SET enabled=1,lifecycle_state='ACTIVE',last_successful_login_method=?,updated_at_ms=? WHERE account_id=?",
                 (method.value, now, account["account_id"]),
@@ -2275,9 +2292,7 @@ class ApplicationServices:
             connection.execute(
                 "UPDATE operations SET state='SUCCEEDED',progress_code='COMPLETED',progress_summary=?,completed_at_ms=?,state_version=state_version+1 WHERE operation_id=?",
                 (
-                    "Managed sign-in and downloadable auth.json completed"
-                    if export_envelope
-                    else "ChatGPT sign-in completed",
+                    "One sign-in created managed and downloadable credentials",
                     now,
                     operation_id,
                 ),
@@ -2297,7 +2312,7 @@ class ApplicationServices:
                 "attempt_id": attempt_id,
                 "account_id": account["public_token"],
                 "state": "COMPLETED",
-                "export_available": export_envelope is not None,
+                "export_available": True,
             },
         )
 
