@@ -31,6 +31,7 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 - One authorization is refreshed twice into managed and downloadable credential bundles; successful refreshes atomically replace both.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.
 - One accepted activation at most for each account and window key; ambiguous submission blocks replay.
+- Activation uses the account's cheapest available model with verified standard-tier rates, its lowest advertised reasoning effort, and no premium speed tier.
 - FastAPI, Jinja, native JavaScript, native SSE, Click, and no Node build or client router.
 - Dashboard view models remain independent from layout experiments.
 - WCAG 2.2 AA target.

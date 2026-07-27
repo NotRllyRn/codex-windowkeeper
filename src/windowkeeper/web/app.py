@@ -591,6 +591,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def operation(request: Request, operation_id: str) -> Response:
         await require_session(request)
         value = await state(request).services.operation(operation_id)
+        try:
+            value["result"] = json.loads(value["result_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            value["result"] = {}
         return render("operation.html", operation=value)
 
     @app.get("/incidents", response_class=HTMLResponse)

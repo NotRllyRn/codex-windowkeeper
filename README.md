@@ -7,7 +7,7 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 - Isolated runtime and encrypted managed credential lineage per account.
 - One-approval enrollment that refreshes the source twice into a managed credential and a downloadable `auth.json`.
 - Device-code sign-in (recommended), managed browser OAuth, and access/refresh-token import.
-- Confirmed, estimated, and unknown scheduling states; manual activation uses the same deduplication path.
+- Confirmed, estimated, and unknown scheduling states; activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
 - Durable operations, incidents, SSE updates, sanitized JSONL logs, and generic/Slack/Discord webhooks.
 - SQLite, AES-256-GCM, opaque administrator sessions, CSRF, recent-password confirmation, and managed Codex availability checks.
@@ -81,7 +81,7 @@ windowkeeper vault verify --key-file /secure/current.key
 
 Vault rotation is offline, all-or-nothing, and re-encrypts managed credentials, downloadable auth bundles, and webhook URLs/signing secrets before writing the new key file. Replace the configured key file atomically only after the command succeeds.
 
-The dashboard provides password-reauthenticated download of the latest `auth.json`, account enable/disable, one-approval reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Each successful refresh atomically replaces both the managed and downloadable credential branches.
+The dashboard provides password-reauthenticated download of the latest `auth.json`, account enable/disable, one-approval reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Each successful refresh atomically replaces both the managed and downloadable credential branches. Activation records the selected model, reasoning effort, standard service tier, and pricing verification date in its durable operation result.
 
 ## Security boundary
 

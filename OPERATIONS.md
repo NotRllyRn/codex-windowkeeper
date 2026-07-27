@@ -26,6 +26,8 @@ Enrollment and reauthentication require one ChatGPT approval. Windowkeeper immed
 
 This relies on OpenAI's limited refresh-token reuse grace period. Windowkeeper validates that both outputs rotated and match the same account/workspace. If either exchange fails, neither stored bundle is replaced. Replacing the local download does not remotely revoke copies downloaded earlier.
 
+Before activation, Windowkeeper reads every page of the authenticated Codex model catalog and intersects visible text models with its program-managed [official Codex credit rate](https://developers.openai.com/codex/pricing) manifest. It selects a model only when that model is no more expensive than every candidate for input, cached input, and output, then explicitly requests its lowest advertised reasoning effort and the standard `default` service tier. Unknown, unavailable, incomparable, or silently substituted choices fail before the activation prompt is dispatched. Update the managed rate manifest whenever the pinned Codex release or official rate card changes.
+
 ## Back up and restore
 
 Stop Windowkeeper before all offline CLI operations.

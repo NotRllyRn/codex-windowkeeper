@@ -173,7 +173,22 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             follow_redirects=False,
         )
         assert activation.status_code == 303
-        wait_for(client, "Succeeded", activation.headers["location"])
+        activation_html = wait_for(client, "Succeeded", activation.headers["location"])
+        assert "gpt-5.4-mini" in activation_html
+        assert "Minimal · Standard tier" in activation_html
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            model = json.loads(
+                connection.execute(
+                    "SELECT result_json FROM operations WHERE kind='activation.run'"
+                ).fetchone()[0]
+            )
+        assert model == {
+            "activation_id": model["activation_id"],
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "minimal",
+            "service_tier": "default",
+            "pricing_verified_at": "2026-07-26",
+        }
         post_activation_export = client.post(
             export_path,
             data={"admin_password": PASSWORD, "csrf_token": csrf},

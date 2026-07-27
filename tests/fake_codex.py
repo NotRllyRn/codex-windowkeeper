@@ -137,9 +137,54 @@ for line in sys.stdin:
                 },
             }
         )
+    elif method == "model/list":
+        send(
+            {
+                "id": request_id,
+                "result": {
+                    "data": [
+                        {
+                            "model": "gpt-5.6-sol",
+                            "hidden": False,
+                            "inputModalities": ["text", "image"],
+                            "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                        },
+                        {
+                            "model": "gpt-5.4-mini",
+                            "hidden": False,
+                            "inputModalities": ["text"],
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "minimal"},
+                                {"reasoningEffort": "low"},
+                            ],
+                        },
+                    ],
+                    "nextCursor": None,
+                },
+            }
+        )
     elif method == "thread/start":
-        send({"id": request_id, "result": {"thread": {"id": "thread-1"}}})
+        if params.get("model") != "gpt-5.4-mini" or params.get("serviceTier") != "default":
+            send({"id": request_id, "error": {"code": "expensive_model"}})
+            continue
+        send(
+            {
+                "id": request_id,
+                "result": {
+                    "thread": {"id": "thread-1"},
+                    "model": "gpt-5.4-mini",
+                    "serviceTier": "default",
+                },
+            }
+        )
     elif method == "turn/start":
+        if (
+            params.get("model") != "gpt-5.4-mini"
+            or params.get("effort") != "minimal"
+            or params.get("serviceTier") != "default"
+        ):
+            send({"id": request_id, "error": {"code": "expensive_turn"}})
+            continue
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})
         send({"method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "delta": "OK"}})
         send({"method": "turn/completed", "params": {"turnId": "turn-1"}})

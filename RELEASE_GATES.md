@@ -17,7 +17,7 @@ uv run pip-audit
 uv build
 ```
 
-The automated suite covers migrations, singleton refusal, vault mismatch and rotation, credential/webhook encryption, OAuth callback validation, redaction, CSRF checks, administrator throttling, all five UI layouts, light/dark controls, activation deduplication, tool-item rejection, auth-failure incidents, reauthentication recovery, durable backup/restore, log repair/rotation, and restart reconciliation from upstream turn evidence.
+The automated suite covers migrations, singleton refusal, vault mismatch and rotation, credential/webhook encryption, OAuth callback validation, redaction, CSRF checks, administrator throttling, all five UI layouts, light/dark controls, paginated lowest-cost model selection, explicit standard-tier activation, activation deduplication, tool-item rejection, auth-failure incidents, reauthentication recovery, durable backup/restore, log repair/rotation, and restart reconciliation from upstream turn evidence.
 
 CI uses commit-SHA-pinned actions and publishes multi-architecture images with SBOM, provenance, and GitHub build attestation for version tags.
 
@@ -25,7 +25,7 @@ CI uses commit-SHA-pinned actions and publishes multi-architecture images with S
 
 Do not publish a release until all of the following are recorded for the Codex package installed in the image:
 
-- Exact Codex package version, `codex --version` output, executable SHA-256, initialization schema, login methods, callback ports, credential-file allowlist, usage shape, persistent-thread behavior, and no-tool activation profile.
+- Exact Codex package version, `codex --version` output, executable SHA-256, initialization schema, login methods, callback ports, credential-file allowlist, usage shape, model catalog shape, official credit-rate manifest, persistent-thread behavior, and no-tool activation profile.
 - Device-code enrollment for at least two isolated real accounts and browser OAuth in each enabled deployment mode.
 - Correct account attribution for short and weekly usage reads.
 - The complete activation crash/fault-injection matrix, including pre-write, partial write, accepted response, notification loss, checkpoint failure, restart reconciliation, and proof that no accepted logical window is duplicated.

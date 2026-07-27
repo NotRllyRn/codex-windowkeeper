@@ -29,6 +29,16 @@
       <dt>Completed</dt>
       <dd>{{ operation.completed_at_ms or 'Not complete' }}</dd>
     </div>
+    {% if operation.result.model %}
+    <div>
+      <dt>Model</dt>
+      <dd>{{ operation.result.model }}</dd>
+    </div>
+    <div>
+      <dt>Reasoning</dt>
+      <dd>{{ operation.result.reasoning_effort|title }} · Standard tier</dd>
+    </div>
+    {% endif %}
   </dl>
   {% if operation.error_code %}
   <p class="form-error" role="alert">

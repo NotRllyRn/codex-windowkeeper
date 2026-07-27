@@ -1,9 +1,11 @@
 import hashlib
 from collections.abc import AsyncIterator
+from typing import Any, cast
 from urllib.parse import quote
 
 import pytest
 
+from windowkeeper.codex.adapter import CodexAdapter, select_activation_model
 from windowkeeper.errors import WindowkeeperError
 from windowkeeper.redaction import redact, sanitize_url
 from windowkeeper.services import (
@@ -45,6 +47,73 @@ async def test_activation_rejects_any_tool_item() -> None:
     with pytest.raises(WindowkeeperError) as caught:
         await services._await_turn(notifications(), "turn-1")
     assert caught.value.code == "ACTIVATION_SAFETY_VIOLATION"
+
+
+def test_activation_model_is_selected_by_verified_cost_not_catalog_order() -> None:
+    models = [
+        {
+            "model": "gpt-5.6-sol",
+            "hidden": False,
+            "inputModalities": ["text"],
+            "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+        },
+        {
+            "model": "gpt-5.4-mini",
+            "hidden": False,
+            "inputModalities": ["text"],
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "minimal"},
+                {"reasoningEffort": "low"},
+            ],
+        },
+    ]
+    assert select_activation_model(models).model == "gpt-5.4-mini"
+    assert select_activation_model(models).effort == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_activation_model_reads_every_catalog_page() -> None:
+    class Client:
+        cursors: list[str | None] = []
+
+        async def request(self, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], None]:
+            assert method == "model/list"
+            cursor = cast(str | None, params.get("cursor"))
+            self.cursors.append(cursor)
+            model = "gpt-5.6-sol" if cursor is None else "gpt-5.4-mini"
+            return (
+                {
+                    "data": [
+                        {
+                            "model": model,
+                            "hidden": False,
+                            "inputModalities": ["text"],
+                            "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                        }
+                    ],
+                    "nextCursor": "page-2" if cursor is None else None,
+                },
+                None,
+            )
+
+    client = Client()
+    selected = await CodexAdapter(cast(Any, client)).activation_model()
+    assert selected.model == "gpt-5.4-mini"
+    assert client.cursors == [None, "page-2"]
+
+
+def test_activation_model_fails_closed_without_comparable_pricing() -> None:
+    with pytest.raises(RuntimeError, match="unambiguously cheapest verified pricing"):
+        select_activation_model(
+            [
+                {
+                    "model": "unpriced-preview",
+                    "hidden": False,
+                    "inputModalities": ["text"],
+                    "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                }
+            ]
+        )
 
 
 def test_forked_credentials_must_match_the_managed_identity() -> None:

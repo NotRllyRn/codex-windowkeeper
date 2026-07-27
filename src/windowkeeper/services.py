@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 
 from .clock import SystemClock
-from .codex.adapter import LoginInteraction
+from .codex.adapter import PRICING_VERIFIED_AT, LoginInteraction
 from .database import Database
 from .domain.models import AccountSummary, LoginMethod, RawWindow
 from .domain.scheduling import decide_schedule
@@ -1840,13 +1840,29 @@ class ApplicationServices:
                 payload = await self._credential_payload(account["account_id"])
                 runtime = await self.runtime.use(account["account_id"], payload)
                 async with runtime.lock:
-                    thread_id = await runtime.adapter.create_thread(str(runtime.workspace))
+                    model = await runtime.adapter.activation_model()
+                    thread_id = await runtime.adapter.create_thread(str(runtime.workspace), model)
                     now = self.clock.now_ms()
 
                     def thread_created(connection: sqlite3.Connection) -> None:
                         connection.execute(
                             "UPDATE activation_attempts SET state='THREAD_CREATED',upstream_thread_id=?,updated_at_ms=?,state_version=state_version+1 WHERE activation_id=?",
                             (thread_id, now, activation_id),
+                        )
+                        connection.execute(
+                            "UPDATE operations SET result_json=? WHERE operation_id=?",
+                            (
+                                json.dumps(
+                                    {
+                                        "activation_id": activation_id,
+                                        "model": model.model,
+                                        "reasoning_effort": model.effort,
+                                        "service_tier": "default",
+                                        "pricing_verified_at": PRICING_VERIFIED_AT,
+                                    }
+                                ),
+                                operation_id,
+                            ),
                         )
                         connection.execute(
                             "INSERT INTO activation_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1890,7 +1906,9 @@ class ApplicationServices:
                         )
 
                     await self.database.transaction(mark_dispatching)
-                    turn_id, _ = await runtime.adapter.start_turn(thread_id, activation_id, PROMPT)
+                    turn_id, _ = await runtime.adapter.start_turn(
+                        thread_id, activation_id, PROMPT, model
+                    )
                     await self._accept_turn(activation_id, turn_id)
                     result = await self._await_turn(runtime.adapter.client.notifications(), turn_id)
                     await self._complete_activation(account, activation_id, operation_id, result)
