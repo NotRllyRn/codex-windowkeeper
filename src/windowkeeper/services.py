@@ -19,6 +19,7 @@ from .domain.usage import normalize_usage
 from .errors import Conflict, WindowkeeperError
 from .ids import new_id, public_token
 from .redaction import redact
+from .secret_types import Secret
 from .security import digest
 from .vault import Envelope, Vault
 
@@ -850,9 +851,25 @@ class ApplicationServices:
         return operation_id
 
     async def start_login(
-        self, public: str, method: LoginMethod, session_token: str
+        self,
+        public: str,
+        method: LoginMethod,
+        session_token: str,
+        access_token: Secret | None = None,
+        refresh_token: Secret | None = None,
     ) -> dict[str, str]:
         account = await self._account_row(public)
+        if method == LoginMethod.MANUAL_TOKENS and (
+            not access_token
+            or not refresh_token
+            or not access_token.reveal().strip()
+            or not refresh_token.reveal().strip()
+            or len(access_token.reveal()) > 65_536
+            or len(refresh_token.reveal()) > 65_536
+        ):
+            raise WindowkeeperError(
+                "MANUAL_TOKENS_INVALID", "Enter an access token and refresh token", 422
+            )
         if method == LoginMethod.CHATGPT_BROWSER and self.settings.browser_oauth_mode == "disabled":
             raise Conflict(
                 "LOGIN_METHOD_UNAVAILABLE", "Browser sign-in is disabled for this deployment"
@@ -903,7 +920,16 @@ class ApplicationServices:
                 "LOGIN_ALREADY_ACTIVE", "Another sign-in is already active for this account"
             ) from error
         self._background(
-            self._run_login(account, operation_id, attempt_id, method, session_token, nonce)
+            self._run_login(
+                account,
+                operation_id,
+                attempt_id,
+                method,
+                session_token,
+                nonce,
+                access_token,
+                refresh_token,
+            )
         )
         return {
             "operation_id": operation_id,
@@ -996,6 +1022,8 @@ class ApplicationServices:
         method: LoginMethod,
         session_token: str,
         nonce: str,
+        access_token: Secret | None = None,
+        refresh_token: Secret | None = None,
     ) -> None:
         lock = self._browser_login_lock if method == LoginMethod.CHATGPT_BROWSER else asyncio.Lock()
         try:
@@ -1004,9 +1032,22 @@ class ApplicationServices:
                     operation_id, "RUNNING", "STARTING_RUNTIME", "Starting isolated Codex runtime"
                 )
                 await self._login_state(attempt_id, "STARTING_RUNTIME")
-                identity, source = await self._capture_login(
-                    account, operation_id, attempt_id, method, session_token, nonce
-                )
+                source_identity: dict[str, Any] | None = None
+                if method == LoginMethod.MANUAL_TOKENS:
+                    if not access_token or not refresh_token:
+                        raise WindowkeeperError(
+                            "MANUAL_TOKENS_INVALID", "Enter an access token and refresh token", 422
+                        )
+                    source = self.vault.imported_tokens(
+                        access_token.reveal().strip(),
+                        refresh_token.reveal().strip(),
+                        self.settings.codex_version,
+                        account.get("workspace_constraint"),
+                    )
+                else:
+                    source_identity, source = await self._capture_login(
+                        account, operation_id, attempt_id, method, session_token, nonce
+                    )
                 await self._login_state(attempt_id, "FORKING_CREDENTIALS")
                 self.events.publish(
                     "login.updated",
@@ -1017,7 +1058,9 @@ class ApplicationServices:
                     },
                 )
                 async with self._credential_lock(account["account_id"]):
-                    managed, exported = await self._fork_credentials(account, source)
+                    identity, managed, exported = await self._fork_credentials(account, source)
+                    if source_identity:
+                        verify_same_identity(source_identity, identity)
                     usage = await self._read_usage(account["account_id"], managed)
                     await self._commit_login(
                         account,
@@ -1058,7 +1101,13 @@ class ApplicationServices:
         except Exception as error:
             self.log.warning("login failed", extra={"event": "login.failed"})
             await self._fail_login(
-                attempt_id, operation_id, "FAILED_RETRYABLE", "LOGIN_FAILED", str(error)[:200]
+                attempt_id,
+                operation_id,
+                "FAILED_RETRYABLE",
+                "LOGIN_FAILED",
+                "Imported tokens could not be validated"
+                if method == LoginMethod.MANUAL_TOKENS
+                else str(error)[:200],
             )
             await self.runtime.stop(account["account_id"])
 
@@ -1247,7 +1296,7 @@ class ApplicationServices:
 
     async def _fork_credentials(
         self, account: dict[str, Any], source: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         managed_identity, managed = await self._refresh_payload(account, source)
         exported_identity, exported = await self._refresh_payload(account, source)
         verify_same_identity(managed_identity, exported_identity)
@@ -1255,7 +1304,7 @@ class ApplicationServices:
             raise WindowkeeperError(
                 "CODEX_TOKEN_FORK_FAILED", "Codex returned the same OAuth credential twice"
             )
-        return managed, exported
+        return managed_identity, managed, exported
 
     async def _read_usage(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         runtime = await self.runtime.use(account_id, payload)
@@ -1359,7 +1408,7 @@ class ApplicationServices:
         try:
             async with self._usage_semaphore, self._credential_lock(account["account_id"]):
                 source = await self._credential_payload(account["account_id"])
-                managed, exported = await self._fork_credentials(account, source)
+                _, managed, exported = await self._fork_credentials(account, source)
                 raw = await self._read_usage(account["account_id"], managed)
                 await self._commit_usage(
                     account,

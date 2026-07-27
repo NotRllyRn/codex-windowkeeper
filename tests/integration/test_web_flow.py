@@ -207,6 +207,90 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             auth_error_marker.unlink(missing_ok=True)
 
 
+def test_manual_tokens_use_the_normal_managed_credential_flow(tmp_path: Path) -> None:
+    executable = Path(__file__).parents[1] / "fake_codex.py"
+    os.chmod(executable, 0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    access_token = "source.access.jwt"  # noqa: S105
+    refresh_token = "source-refresh-token"  # noqa: S105
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        rejected = client.post(
+            "/accounts",
+            data={
+                "display_name": "Rejected import",
+                "login_method": "MANUAL_TOKENS",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        assert rejected.status_code == 422
+        assert client.get("/api/internal/v1/dashboard").json()["data"] == []
+        created = client.post(
+            "/accounts",
+            data={
+                "display_name": "Imported",
+                "login_method": "MANUAL_TOKENS",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        assert created.headers["location"].startswith("/operations/")
+        operation = wait_for(client, "Succeeded", created.headers["location"])
+        wait_for(client, "Imported")
+        account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+        detail = client.get(f"/accounts/{account['public_token']}")
+        assert "MANUAL_TOKENS" in detail.text
+        assert access_token not in operation + detail.text
+        assert refresh_token not in client.get("/logs/export").text
+        assert not list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
+        traces = list((tmp_path / "run" / "accounts").glob("*/.fake-refreshes"))
+        assert len(traces) == 1
+        assert traces[0].read_text(encoding="utf-8").splitlines() == ["refresh-1", "refresh-2"]
+        exported = client.post(
+            f"/accounts/{account['public_token']}/auth-export",
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert json.loads(exported.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
+        replaced = client.post(
+            f"/accounts/{account['public_token']}/reauthenticate",
+            data={
+                "login_method": "MANUAL_TOKENS",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        assert replaced.status_code == 303
+        wait_for(client, "Succeeded", replaced.headers["location"])
+        assert traces[0].read_text(encoding="utf-8").splitlines() == [
+            "refresh-1",
+            "refresh-2",
+            "refresh-3",
+            "refresh-4",
+        ]
+        exported = client.post(
+            f"/accounts/{account['public_token']}/auth-export",
+            data={"admin_password": PASSWORD, "csrf_token": csrf},
+        )
+        assert json.loads(exported.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+
+
 def test_latest_auth_export_survives_restart_and_activation(tmp_path: Path) -> None:
     executable = Path(__file__).parents[1] / "fake_codex.py"
     os.chmod(executable, 0o700)

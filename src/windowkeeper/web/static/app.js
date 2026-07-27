@@ -67,6 +67,18 @@ document.querySelectorAll("form[data-confirm]").forEach((form) => {
 	});
 });
 
+document.querySelectorAll("[data-token-fields]").forEach((fields) => {
+	const form = fields.closest("form");
+	const update = () => {
+		fields.hidden = form.elements.login_method.value !== "MANUAL_TOKENS";
+		fields
+			.querySelectorAll("textarea")
+			.forEach((input) => (input.required = !fields.hidden));
+	};
+	form.addEventListener("change", update);
+	update();
+});
+
 const variantSwitcher = document.querySelector("[data-variant-switcher]");
 if (variantSwitcher) {
 	const variants = variantSwitcher.dataset.variants.split(",");

@@ -34,6 +34,8 @@ class CodexAdapter:
         self.client = client
 
     async def start_login(self, method: LoginMethod) -> LoginInteraction:
+        if method == LoginMethod.MANUAL_TOKENS:
+            raise ValueError("manual token import does not start OAuth")
         kind = "chatgpt" if method == LoginMethod.CHATGPT_BROWSER else "chatgptDeviceCode"
         params: dict[str, Any] = {"type": kind}
         if method == LoginMethod.CHATGPT_BROWSER:

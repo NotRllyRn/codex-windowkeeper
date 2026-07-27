@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,21 @@ def test_envelope_round_trip_and_account_binding() -> None:
         vault.open_text(vault.seal_text("webhook:a", "https://example.test/hook"))
         == "https://example.test/hook"
     )
+
+
+def test_imported_tokens_create_a_minimal_refreshable_auth_file() -> None:
+    vault = Vault(decode_key(generate_key()), "instance")
+    payload = vault.imported_tokens("access.jwt.value", "refresh-value", "test")
+    auth = json.loads(vault.auth_json(payload))
+    assert auth == {
+        "tokens": {
+            "id_token": "access.jwt.value",
+            "access_token": "access.jwt.value",
+            "refresh_token": "refresh-value",
+            "account_id": None,
+        }
+    }
+    assert "last_refresh" not in auth
 
 
 def test_capture_and_materialize_reject_unsafe_paths(tmp_path: Path) -> None:

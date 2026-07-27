@@ -124,6 +124,38 @@ class Vault:
             "workspace_constraint": workspace,
         }
 
+    def imported_tokens(
+        self,
+        access_token: str,
+        refresh_token: str,
+        codex_version: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        content = json.dumps(
+            {
+                "tokens": {
+                    "id_token": access_token,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "account_id": None,
+                }
+            },
+            separators=(",", ":"),
+        ).encode()
+        return {
+            "schema_version": 1,
+            "codex_version": codex_version,
+            "files": [
+                {
+                    "relative_path": "auth.json",
+                    "mode": 0o600,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_base64": base64.b64encode(content).decode(),
+                }
+            ],
+            "workspace_constraint": workspace,
+        }
+
     def auth_json(self, payload: dict[str, Any]) -> bytes:
         for item in payload.get("files", []):
             if item.get("relative_path") != "auth.json":

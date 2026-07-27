@@ -19,7 +19,7 @@ async def test_migrations_are_idempotent_and_foreign_keys_hold(tmp_path: Path) -
         lambda connection: connection.execute("PRAGMA foreign_keys").fetchone()[0]
     )
     await database.close()
-    assert version == 3
+    assert version == 4
     assert foreign_keys == 1
     second = Database(path)
     second.start()

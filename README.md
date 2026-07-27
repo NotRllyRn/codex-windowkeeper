@@ -6,7 +6,7 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 
 - Isolated runtime and encrypted managed credential lineage per account.
 - One-approval enrollment that refreshes the source twice into a managed credential and a downloadable `auth.json`.
-- Device-code sign-in (recommended) and managed browser OAuth with strict callback validation.
+- Device-code sign-in (recommended), managed browser OAuth, and access/refresh-token import.
 - Confirmed, estimated, and unknown scheduling states; manual activation uses the same deduplication path.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
 - Durable operations, incidents, SSE updates, sanitized JSONL logs, and generic/Slack/Discord webhooks.
@@ -85,7 +85,7 @@ The dashboard provides password-reauthenticated download of the latest `auth.jso
 
 ## Security boundary
 
-The vault key must not live in SQLite or the persistent data directory. Runtime credential files exist only under the runtime tmpfs and are removed when the account process stops. URL query strings, callback values, device codes, tokens, authorization headers, and known token-shaped strings are redacted before logs, SSE, API responses, incidents, or webhooks.
+The vault key must not live in SQLite or the persistent data directory. Runtime credential files exist only under the runtime tmpfs and are removed when the account process stops. Manually pasted tokens are immediately refreshed and only the encrypted results are stored. URL query strings, callback values, device codes, tokens, authorization headers, and known token-shaped strings are redacted before logs, SSE, API responses, incidents, or webhooks.
 
 Windowkeeper trusts its managed Codex child process with plaintext credentials while that isolated process is running. It does not protect against a compromised host, root user, or malicious Codex binary.
 

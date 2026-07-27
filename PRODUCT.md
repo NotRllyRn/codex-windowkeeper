@@ -26,7 +26,7 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 
 - Multiple independently authenticated accounts with overlapping labels.
 - The Codex app-server installed and managed by Windowkeeper is the only upstream integration seam.
-- Device-code login is recommended; browser login supports automatic loopback and strict one-time manual callback forwarding.
+- Device-code login is recommended; browser login and manual access/refresh-token import are also supported.
 - SQLite is the durable store; one process owns one data directory.
 - One authorization is refreshed twice into managed and downloadable credential bundles; successful refreshes atomically replace both.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.

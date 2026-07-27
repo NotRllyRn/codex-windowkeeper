@@ -203,16 +203,45 @@ Windowkeeper{% endblock %} {% block content %}
             >Uses the configured loopback or secure manual callback mode.</em
           ></span
         ></label
-      ><label for="reauth_password">Confirm admin password</label
+      ><label class="method-option"
+        ><input type="radio" name="login_method" value="MANUAL_TOKENS" /><span
+          ><strong>Paste tokens</strong
+          ><em
+            >Import an access token and refresh token for this account.</em
+          ></span
+        ></label
+      >
+      <div data-token-fields hidden>
+        <label for="reauth_access_token">Access token</label
+        ><textarea
+          id="reauth_access_token"
+          name="access_token"
+          rows="3"
+          maxlength="65536"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <label for="reauth_refresh_token">Refresh token</label
+        ><textarea
+          id="reauth_refresh_token"
+          name="refresh_token"
+          rows="3"
+          maxlength="65536"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <p class="field-help">
+          The pasted values are replaced immediately after validation.
+        </p>
+      </div>
+      <label for="reauth_password">Confirm admin password</label
       ><input
         id="reauth_password"
         name="admin_password"
         type="password"
         required
         autocomplete="current-password"
-      /><button class="primary-button" type="submit">
-        Start secure sign-in
-      </button>
+      /><button class="primary-button" type="submit">Continue</button>
     </fieldset>
   </form>
 </section>

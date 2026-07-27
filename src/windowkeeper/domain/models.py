@@ -5,6 +5,7 @@ from enum import StrEnum
 class LoginMethod(StrEnum):
     CHATGPT_BROWSER = "CHATGPT_BROWSER"
     CHATGPT_DEVICE_CODE = "CHATGPT_DEVICE_CODE"
+    MANUAL_TOKENS = "MANUAL_TOKENS"
 
 
 class OverallState(StrEnum):

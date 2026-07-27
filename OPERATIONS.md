@@ -16,7 +16,7 @@ Set a 15+ character `WINDOWKEEPER_ADMIN_PASSWORD` in `.env`. Windowkeeper loads 
 
 ## Account sign-in
 
-Device code is recommended for local, NAS, Docker, and SSH deployments. Browser OAuth supports three modes:
+Device code is recommended for local, NAS, Docker, and SSH deployments. Existing access and refresh tokens may instead be pasted through the authenticated UI; no timestamp is required, and only the immediately refreshed encrypted outputs are stored. Browser OAuth supports three modes:
 
 - `manual`: display the validated authorization URL and paste the resulting localhost callback URL into the authenticated UI.
 - `host-loopback`: receive the validated localhost callback directly; only use on a Linux host where Windowkeeper owns the pinned callback ports.

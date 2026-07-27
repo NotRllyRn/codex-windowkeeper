@@ -67,7 +67,37 @@
           callback URL back into Windowkeeper.</em
         ></span
       ></label
+    ><label class="method-option"
+      ><input type="radio" name="login_method" value="MANUAL_TOKENS" /><span
+        ><strong>Paste tokens</strong
+        ><em
+          >Import an existing ChatGPT access token and refresh token.</em
+        ></span
+      ></label
     >
+    <div data-token-fields hidden>
+      <label for="access_token">Access token</label
+      ><textarea
+        id="access_token"
+        name="access_token"
+        rows="3"
+        maxlength="65536"
+        autocomplete="off"
+        spellcheck="false"
+      ></textarea>
+      <label for="refresh_token">Refresh token</label
+      ><textarea
+        id="refresh_token"
+        name="refresh_token"
+        rows="3"
+        maxlength="65536"
+        autocomplete="off"
+        spellcheck="false"
+      ></textarea>
+      <p class="field-help">
+        Tokens are immediately refreshed and never stored in their pasted form.
+      </p>
+    </div>
   </fieldset>
   <fieldset>
     <legend>Administrator confirmation</legend>
@@ -80,8 +110,8 @@
       autocomplete="current-password"
     />
     <p class="field-help">
-      Credential enrollment requires administrator reauthentication and one
-      ChatGPT approval.
+      Credential enrollment requires administrator reauthentication. OAuth
+      methods require one ChatGPT approval.
     </p>
   </fieldset>
   <div class="form-actions">
