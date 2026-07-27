@@ -2,7 +2,6 @@
 services:
   windowkeeper:
     build: .
-    image: codex-windowkeeper:${WINDOWKEEPER_IMAGE_TAG:-local}
     init: true
     restart: unless-stopped
     network_mode: host

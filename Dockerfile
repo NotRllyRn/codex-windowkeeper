@@ -14,9 +14,9 @@ RUN apt-get update \
  && apt-get purge -y npm \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=build /build/dist/*.whl /tmp/windowkeeper.whl
-RUN pip install --no-cache-dir /tmp/windowkeeper.whl \
- && rm /tmp/windowkeeper.whl \
+COPY --from=build /build/dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl \
+ && rm /tmp/*.whl \
  && useradd --system --uid 10001 --create-home --home-dir /home/windowkeeper windowkeeper \
  && install -d -o windowkeeper -g windowkeeper -m 0700 /data /run/windowkeeper
 USER 10001:10001
