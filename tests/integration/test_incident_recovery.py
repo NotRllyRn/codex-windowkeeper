@@ -173,6 +173,14 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
         connection.execute(
             "UPDATE account_state SET activation_state='SAFETY_BLOCKED',overall_state='WARNING'"
         )
+        connection.execute(
+            """INSERT INTO activation_attempts
+            SELECT 'stale-plan',account_id,'stale-window','SCHEDULED',prompt_version,prompt_sha256,
+            'REPORTED_RESET','CONFIRMED',basis_reset_at_s,basis_duration_minutes,0,'PLANNED',NULL,NULL,
+            'stale-plan',NULL,NULL,NULL,created_at_ms,updated_at_ms,NULL,1
+            FROM activation_attempts WHERE activation_id=?""",
+            (activation_id,),
+        )
         connection.commit()
     with TestClient(create_app(settings)) as client:
         login = client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
@@ -185,3 +193,10 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
         assert acknowledged.status_code == 303
         account = client.get("/api/internal/v1/dashboard").json()["data"][0]
         assert account["activation_state"] != "SAFETY_BLOCKED"
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert (
+                connection.execute(
+                    "SELECT state FROM activation_attempts WHERE activation_id='stale-plan'"
+                ).fetchone()[0]
+                == "CANCELLED"
+            )

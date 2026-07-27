@@ -7,7 +7,8 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 - Isolated runtime and encrypted managed credential lineage per account.
 - One-approval enrollment that refreshes the source twice into a managed credential and a downloadable `auth.json`.
 - Device-code sign-in (recommended), managed browser OAuth, and access/refresh-token import.
-- Confirmed, estimated, and unknown scheduling states; activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
+- Immediate first-window activation, one in-flight activation per account, and reported-reset scheduling with a duration fallback when an idle reset moves forward on every poll.
+- Activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
 - Durable operations, incidents, SSE updates, sanitized JSONL logs, and generic/Slack/Discord webhooks.
 - SQLite, AES-256-GCM, opaque administrator sessions, CSRF, recent-password confirmation, and managed Codex availability checks.

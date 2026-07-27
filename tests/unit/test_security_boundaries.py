@@ -33,6 +33,25 @@ def test_browser_callback_contract_and_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_activation_accepts_the_real_codex_terminal_event_shape() -> None:
+    async def notifications() -> AsyncIterator[dict[str, object]]:
+        yield {
+            "method": "item/agentMessage/delta",
+            "params": {"turnId": "turn-1", "delta": "OK"},
+        }
+        yield {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "completed"},
+            },
+        }
+
+    services = object.__new__(ApplicationServices)
+    assert await services._await_turn(notifications(), "turn-1") == "OK"
+
+
+@pytest.mark.asyncio
 async def test_activation_rejects_any_tool_item() -> None:
     async def notifications() -> AsyncIterator[dict[str, object]]:
         yield {

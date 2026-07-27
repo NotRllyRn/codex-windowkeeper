@@ -553,8 +553,13 @@ class ApplicationServices:
                 WHERE aa.state='PLANNED' AND aa.scheduled_for_ms<=? AND a.enabled=1
                 AND a.deleted_at_ms IS NULL AND s.auth_state='VERIFIED'
                 AND s.activation_state NOT IN('AMBIGUOUS','SAFETY_BLOCKED')
+                AND aa.activation_id=(SELECT candidate.activation_id FROM activation_attempts candidate
+                    WHERE candidate.account_id=aa.account_id AND candidate.state='PLANNED'
+                    AND candidate.scheduled_for_ms<=? ORDER BY candidate.scheduled_for_ms,candidate.created_at_ms LIMIT 1)
+                AND NOT EXISTS(SELECT 1 FROM activation_attempts active WHERE active.account_id=aa.account_id
+                    AND active.state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING'))
                 ORDER BY aa.scheduled_for_ms LIMIT ?""",
-                (now, self.settings.activation_concurrency),
+                (now, now, self.settings.activation_concurrency),
             ).fetchall()
             claimed: list[tuple[dict[str, Any], str, str]] = []
             for row in rows:
@@ -564,6 +569,10 @@ class ApplicationServices:
                 ).rowcount
                 if not changed:
                     continue
+                connection.execute(
+                    "UPDATE account_state SET activation_state='ACTIVATING',updated_at_ms=?,state_version=state_version+1 WHERE account_id=?",
+                    (now, row["account_id"]),
+                )
                 operation_id = new_id()
                 connection.execute(
                     "INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1570,7 +1579,7 @@ class ApplicationServices:
                 ),
             )
             connection.execute(
-                "UPDATE account_state SET usage_state='FRESH',overall_state=CASE WHEN auth_state='VERIFIED' THEN 'HEALTHY' ELSE overall_state END,last_error_code=NULL,last_error_summary=NULL,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                "UPDATE account_state SET usage_state='FRESH',overall_state=CASE WHEN activation_state IN('AMBIGUOUS','SAFETY_BLOCKED') THEN 'WARNING' WHEN auth_state='VERIFIED' THEN 'HEALTHY' ELSE overall_state END,last_error_code=CASE WHEN activation_state IN('AMBIGUOUS','SAFETY_BLOCKED') THEN last_error_code END,last_error_summary=CASE WHEN activation_state IN('AMBIGUOUS','SAFETY_BLOCKED') THEN last_error_summary END,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                 (now, account["account_id"]),
             )
             connection.execute(
@@ -1726,6 +1735,22 @@ class ApplicationServices:
         activation_id = new_id()
 
         def create(connection: sqlite3.Connection) -> tuple[str, bool]:
+            active = connection.execute(
+                "SELECT activation_id FROM activation_attempts WHERE account_id=? AND state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING') ORDER BY created_at_ms LIMIT 1",
+                (account["account_id"],),
+            ).fetchone()
+            if active:
+                return str(active[0]), False
+            planned = connection.execute(
+                "SELECT activation_id FROM activation_attempts WHERE account_id=? AND state='PLANNED' ORDER BY scheduled_for_ms,created_at_ms LIMIT 1",
+                (account["account_id"],),
+            ).fetchone()
+            if planned:
+                changed = connection.execute(
+                    "UPDATE activation_attempts SET state='QUEUED',trigger=?,scheduled_for_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE activation_id=? AND state='PLANNED'",
+                    (trigger, now, now, planned[0]),
+                ).rowcount
+                return str(planned[0]), bool(changed)
             usage = connection.execute(
                 "SELECT short_resets_at_s,short_duration_minutes FROM usage_current WHERE account_id=?",
                 (account["account_id"],),
@@ -1942,34 +1967,48 @@ class ApplicationServices:
 
     async def _await_turn(self, notifications: Any, turn_id: str) -> str:
         text = ""
-        async with asyncio.timeout(300):
-            async for event in notifications:
-                method = str(event.get("method", ""))
-                raw_params = event.get("params")
-                params = raw_params if isinstance(raw_params, dict) else {}
-                item = params.get("item")
-                item_type = str(item.get("type", "")) if isinstance(item, dict) else ""
-                safety_evidence = f"{method}/{item_type}".lower()
-                if any(
-                    marker in safety_evidence
-                    for marker in (
-                        "commandexecution",
-                        "filechange",
-                        "toolcall",
-                        "requestapproval",
-                        "requestuserinput",
+        try:
+            async with asyncio.timeout(300):
+                async for event in notifications:
+                    method = str(event.get("method", ""))
+                    raw_params = event.get("params")
+                    params = raw_params if isinstance(raw_params, dict) else {}
+                    item = params.get("item")
+                    item_type = str(item.get("type", "")) if isinstance(item, dict) else ""
+                    safety_evidence = f"{method}/{item_type}".lower()
+                    if any(
+                        marker in safety_evidence
+                        for marker in (
+                            "commandexecution",
+                            "filechange",
+                            "toolcall",
+                            "requestapproval",
+                            "requestuserinput",
+                        )
+                    ):
+                        raise WindowkeeperError(
+                            "ACTIVATION_SAFETY_VIOLATION",
+                            "Activation requested a forbidden action",
+                        )
+                    turn = params.get("turn")
+                    event_turn_id = (
+                        turn.get("id") if isinstance(turn, dict) else params.get("turnId")
                     )
-                ):
-                    raise WindowkeeperError(
-                        "ACTIVATION_SAFETY_VIOLATION", "Activation requested a forbidden action"
-                    )
-                if params.get("turnId") != turn_id:
-                    continue
-                if method in {"item/agentMessage/delta", "item/agentMessageDelta"}:
-                    text += str(params.get("delta", ""))
-                if method in {"turn/completed", "turn/failed"}:
-                    return text.strip()
-        raise TimeoutError("activation did not reach a terminal state")
+                    if event_turn_id != turn_id:
+                        continue
+                    if method in {"item/agentMessage/delta", "item/agentMessageDelta"}:
+                        text += str(params.get("delta", ""))
+                    if method == "turn/completed":
+                        status = str(turn.get("status")) if isinstance(turn, dict) else "completed"
+                        if status == "completed":
+                            return text.strip()
+                        raise WindowkeeperError(
+                            "ACTIVATION_UPSTREAM_FAILED",
+                            f"Codex turn ended with status {status}",
+                        )
+        except TimeoutError as error:
+            raise TimeoutError("activation did not reach a terminal state") from error
+        raise TimeoutError("Codex notification stream closed before activation completed")
 
     async def _accept_turn(self, activation_id: str, turn_id: str) -> None:
         now = self.clock.now_ms()
@@ -2000,6 +2039,10 @@ class ApplicationServices:
             connection.execute(
                 "UPDATE activation_operations SET state='COMPLETED',error_code=NULL,error_summary=NULL,completed_at_ms=?,updated_at_ms=? WHERE activation_id=?",
                 (now, now, activation_id),
+            )
+            connection.execute(
+                "UPDATE activation_attempts SET state='CANCELLED',ambiguity_reason='Superseded by successful activation',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND activation_id<>? AND state='PLANNED'",
+                (now, now, account["account_id"], activation_id),
             )
             connection.execute(
                 "UPDATE operations SET state='SUCCEEDED',progress_code=?,progress_summary=?,error_code=NULL,error_summary=NULL,completed_at_ms=?,state_version=state_version+1 WHERE operation_id=?",
@@ -2240,6 +2283,10 @@ class ApplicationServices:
                 (now, account["account_id"]),
             ).rowcount
             if changed:
+                connection.execute(
+                    "UPDATE activation_attempts SET state='CANCELLED',ambiguity_reason='Discarded after ambiguity review',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
+                    (now, now, account["account_id"]),
+                )
                 connection.execute(
                     "UPDATE account_state SET activation_state='UNSCHEDULED',overall_state='WARNING',last_error_code=NULL,last_error_summary=NULL,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                     (now, account["account_id"]),

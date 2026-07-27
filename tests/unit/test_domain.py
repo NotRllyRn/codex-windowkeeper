@@ -42,6 +42,7 @@ def test_schedule_is_deterministic_and_deduplicated() -> None:
         now_ms=1_000_000,
         safety_delay_seconds=60,
         jitter_max_seconds=30,
+        last_successful_activation_ms=500_000,
     )
     second = decide_schedule(
         account_id="a",
@@ -51,6 +52,7 @@ def test_schedule_is_deterministic_and_deduplicated() -> None:
         now_ms=1_000_000,
         safety_delay_seconds=60,
         jitter_max_seconds=30,
+        last_successful_activation_ms=500_000,
     )
     assert first == second
     assert first.window_key == "reported:2000"
@@ -64,8 +66,39 @@ def test_schedule_is_deterministic_and_deduplicated() -> None:
         safety_delay_seconds=60,
         jitter_max_seconds=30,
         existing_window_keys={first.window_key},
+        last_successful_activation_ms=500_000,
     )
     assert duplicate.run_at_ms is None
+
+
+def test_schedule_starts_an_account_without_a_successful_activation() -> None:
+    decision = decide_schedule(
+        account_id="new",
+        enabled=True,
+        auth_verified=True,
+        short=RawWindow("short", 0, 300, 19_000),
+        now_ms=1_000_000,
+        safety_delay_seconds=60,
+        jitter_max_seconds=30,
+    )
+    assert decision.window_key == "initial"
+    assert decision.run_at_ms == 1_000_000
+
+
+def test_schedule_uses_last_success_when_an_idle_reset_keeps_moving() -> None:
+    decision = decide_schedule(
+        account_id="active",
+        enabled=True,
+        auth_verified=True,
+        short=RawWindow("short", 0, 300, 19_600),
+        now_ms=1_600_000,
+        safety_delay_seconds=60,
+        jitter_max_seconds=30,
+        last_successful_activation_ms=1_000_000,
+        consistent_observations=2,
+    )
+    assert decision.window_key == "estimated:1000000:300"
+    assert decision.source == "OBSERVED_DURATION_FALLBACK"
 
 
 def test_freshness_and_status_are_conservative() -> None:

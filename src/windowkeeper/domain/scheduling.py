@@ -32,6 +32,39 @@ def decide_schedule(
         return ScheduleDecision(
             None, None, "NONE", "UNKNOWN", reason="an ambiguous activation blocks scheduling"
         )
+    if short and short.used_percent == 0 and not last_successful_activation_ms:
+        return ScheduleDecision(
+            "initial",
+            None if "initial" in existing else now_ms,
+            "INITIAL_WINDOW",
+            "CONFIRMED",
+            basis_duration_minutes=short.duration_minutes,
+            reason="start the first managed window",
+        )
+    expected_reset_ms = (
+        last_successful_activation_ms + short.duration_minutes * 60_000
+        if last_successful_activation_ms and short and short.duration_minutes
+        else None
+    )
+    if (
+        estimated_enabled
+        and short
+        and short.used_percent == 0
+        and short.resets_at_s
+        and expected_reset_ms
+        and short.resets_at_s * 1000 > expected_reset_ms + 60_000
+        and consistent_observations >= 2
+    ):
+        key = f"estimated:{last_successful_activation_ms}:{short.duration_minutes}"
+        jitter = deterministic_jitter(account_id, key, jitter_max_seconds)
+        return ScheduleDecision(
+            key,
+            None if key in existing else expected_reset_ms + (safety_delay_seconds + jitter) * 1000,
+            "OBSERVED_DURATION_FALLBACK",
+            "ESTIMATED",
+            basis_duration_minutes=short.duration_minutes,
+            reason="reported idle reset moves with each observation",
+        )
     if short and short.resets_at_s and short.resets_at_s * 1000 > now_ms:
         key = f"reported:{short.resets_at_s}"
         if key in existing:

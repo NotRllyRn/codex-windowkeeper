@@ -187,7 +187,15 @@ for line in sys.stdin:
             continue
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})
         send({"method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "delta": "OK"}})
-        send({"method": "turn/completed", "params": {"turnId": "turn-1"}})
+        send(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "items": [], "status": "completed"},
+                },
+            }
+        )
     elif method == "thread/read":
         turns = []
         if marker(".reconcile-ok"):
