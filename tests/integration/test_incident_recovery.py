@@ -109,6 +109,66 @@ def test_workspace_failure_opens_and_reauthentication_resolves_incident(
         assert resolved["data"]["occurrence_count"] == 1
 
 
+def test_terminal_activation_failure_does_not_require_acknowledgment(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "fake_codex.py"
+    executable = tmp_path / "fake_codex.py"
+    executable.write_bytes(source.read_bytes())
+    executable.chmod(0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        client.post(
+            "/accounts",
+            data={
+                "display_name": "Limited",
+                "workspace": "workspace-1",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            accounts = client.get("/api/internal/v1/dashboard").json()["data"]
+            if accounts and accounts[0]["short_percent"] == 22:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("account enrollment did not complete")
+        executable.with_suffix(".turn-failed").touch()
+        activation = client.post(
+            f"/accounts/{accounts[0]['public_token']}/activate",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if "Failed" in client.get(activation.headers["location"]).text:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("activation failure did not complete")
+        detail = client.get(f"/accounts/{accounts[0]['public_token']}").text
+        assert "Ambiguous activation requires review" not in detail
+
+    with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+        assert connection.execute(
+            "SELECT state FROM activation_attempts ORDER BY created_at_ms DESC LIMIT 1"
+        ).fetchone()[0] == "FAILED_DEFINITE"
+        assert not connection.execute(
+            "SELECT 1 FROM incidents WHERE problem_type='activation_ambiguous' AND state='OPEN'"
+        ).fetchone()
+
+
 def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
     source = Path(__file__).parents[1] / "fake_codex.py"
     executable = tmp_path / "fake_codex.py"

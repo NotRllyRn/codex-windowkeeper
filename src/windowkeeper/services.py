@@ -1990,14 +1990,17 @@ class ApplicationServices:
                     await self.runtime.stop(account["account_id"])
                     return
             safety_blocked = False
+            definitely_failed = False
             if isinstance(error, WindowkeeperError):
                 safety_blocked = error.code == "ACTIVATION_SAFETY_VIOLATION"
+                definitely_failed = error.code == "ACTIVATION_UPSTREAM_FAILED"
             await self._ambiguous_activation(
                 account,
                 activation_id,
                 operation_id,
                 str(error)[:200],
                 safety_blocked=safety_blocked,
+                definitely_failed=definitely_failed,
             )
             await self.runtime.stop(account["account_id"])
 
@@ -2114,6 +2117,7 @@ class ApplicationServices:
         reason: str,
         *,
         safety_blocked: bool = False,
+        definitely_failed: bool = False,
     ) -> None:
         now = self.clock.now_ms()
         safe_reason = str(redact(reason))[:200]
@@ -2124,7 +2128,9 @@ class ApplicationServices:
             ).fetchone()
             state = (
                 "AMBIGUOUS"
-                if row and row[0] in {"TURN_DISPATCHING", "TURN_ACCEPTED", "RUNNING"}
+                if not definitely_failed
+                and row
+                and row[0] in {"TURN_DISPATCHING", "TURN_ACCEPTED", "RUNNING"}
                 else "FAILED_DEFINITE"
             )
             connection.execute(

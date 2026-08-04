@@ -186,13 +186,20 @@ for line in sys.stdin:
             send({"id": request_id, "error": {"code": "expensive_turn"}})
             continue
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})
-        send({"method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "delta": "OK"}})
+        status = "failed" if marker(".turn-failed") else "completed"
+        if status == "completed":
+            send(
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"turnId": "turn-1", "delta": "OK"},
+                }
+            )
         send(
             {
                 "method": "turn/completed",
                 "params": {
                     "threadId": "thread-1",
-                    "turn": {"id": "turn-1", "items": [], "status": "completed"},
+                    "turn": {"id": "turn-1", "items": [], "status": status},
                 },
             }
         )
