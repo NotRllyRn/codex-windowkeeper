@@ -127,7 +127,7 @@ for line in sys.stdin:
                                 },
                                 {
                                     "name": "weekly",
-                                    "usedPercent": 41,
+                                    "usedPercent": 100 if marker(".weekly-exhausted") else 41,
                                     "windowDurationMins": 10080,
                                     "resetsAt": int(time.time()) + 86400,
                                 },

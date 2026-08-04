@@ -12,7 +12,7 @@ Windowkeeper serves one self-hosting operator who administers multiple ChatGPT/C
 
 ## Product Purpose
 
-Windowkeeper monitors each account's Codex usage windows and intentionally submits one fixed minimal activation after an eligible short-window reset. Success means every account remains isolated, activation is never blindly duplicated, and the operator can understand and repair every unhealthy state through the dashboard or CLI.
+Windowkeeper monitors each account's Codex usage windows and intentionally submits one fixed minimal activation after short and weekly limits permit it. Success means exhausted accounts recover automatically after reset, every account remains isolated, activation is never blindly duplicated, and the operator can understand and repair every unhealthy state through the dashboard or CLI.
 
 ## Positioning
 
@@ -30,7 +30,7 @@ The service runs as one hardened Docker-first Python process on Linux amd64 or a
 - SQLite is the durable store; one process owns one data directory.
 - One authorization is refreshed twice into managed and downloadable credential bundles; successful refreshes atomically replace both.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.
-- One accepted activation at most for each account and window key; ambiguous submission blocks replay.
+- One accepted activation at most for each account and window key; exhausted windows wait automatically, while genuinely ambiguous submissions block replay.
 - Activation uses the account's cheapest available model with verified standard-tier rates, its lowest advertised reasoning effort, and no premium speed tier.
 - FastAPI, Jinja, native JavaScript, native SSE, Click, and no Node build or client router.
 - Dashboard view models remain independent from layout experiments.

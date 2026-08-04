@@ -71,6 +71,27 @@ def test_schedule_is_deterministic_and_deduplicated() -> None:
     assert duplicate.run_at_ms is None
 
 
+def test_schedule_waits_while_either_usage_window_is_exhausted() -> None:
+    for short, weekly in (
+        (RawWindow("short", 100, 300, 2_000), RawWindow("weekly", 10, 10_080, 3_000)),
+        (RawWindow("short", 0, 300, 2_000), RawWindow("weekly", 100, 10_080, 3_000)),
+    ):
+        decision = decide_schedule(
+            account_id="limited",
+            enabled=True,
+            auth_verified=True,
+            short=short,
+            weekly=weekly,
+            now_ms=1_000_000,
+            safety_delay_seconds=60,
+            jitter_max_seconds=0,
+            last_successful_activation_ms=500_000,
+            consistent_observations=2,
+        )
+        assert not decision.window_key
+        assert decision.reason == "usage is exhausted until a reset"
+
+
 def test_schedule_starts_an_account_without_a_successful_activation() -> None:
     decision = decide_schedule(
         account_id="new",

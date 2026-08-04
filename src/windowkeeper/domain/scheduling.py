@@ -17,6 +17,7 @@ def decide_schedule(
     auth_verified: bool,
     short: RawWindow | None,
     now_ms: int,
+    weekly: RawWindow | None = None,
     safety_delay_seconds: int,
     jitter_max_seconds: int,
     existing_window_keys: set[str] | None = None,
@@ -31,6 +32,10 @@ def decide_schedule(
     if ambiguous_predecessor:
         return ScheduleDecision(
             None, None, "NONE", "UNKNOWN", reason="an ambiguous activation blocks scheduling"
+        )
+    if any(window and (window.used_percent or 0) >= 100 for window in (short, weekly)):
+        return ScheduleDecision(
+            None, None, "NONE", "CONFIRMED", reason="usage is exhausted until a reset"
         )
     if short and short.used_percent == 0 and not last_successful_activation_ms:
         return ScheduleDecision(

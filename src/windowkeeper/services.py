@@ -586,8 +586,11 @@ class ApplicationServices:
             rows = connection.execute(
                 """SELECT aa.activation_id,a.account_id,a.public_token,a.display_name,a.enabled,s.auth_state
                 FROM activation_attempts aa JOIN accounts a USING(account_id) JOIN account_state s USING(account_id)
+                JOIN usage_current u USING(account_id)
                 WHERE aa.state='PLANNED' AND aa.scheduled_for_ms<=? AND a.enabled=1
                 AND a.deleted_at_ms IS NULL AND s.auth_state='VERIFIED'
+                AND COALESCE(u.short_used_percent_raw,0)<100
+                AND COALESCE(u.weekly_used_percent_raw,0)<100
                 AND s.activation_state NOT IN('AMBIGUOUS','SAFETY_BLOCKED')
                 AND aa.activation_id=(SELECT candidate.activation_id FROM activation_attempts candidate
                     WHERE candidate.account_id=aa.account_id AND candidate.state='PLANNED'
@@ -1665,7 +1668,7 @@ class ApplicationServices:
             observations = 0
             if usage and usage["short_duration_minutes"]:
                 for row in connection.execute(
-                    "SELECT normalized_json FROM usage_snapshots WHERE account_id=? AND success=1 ORDER BY completed_at_ms DESC LIMIT 2",
+                    "SELECT raw_shape_summary_json FROM usage_snapshots WHERE account_id=? AND success=1 ORDER BY completed_at_ms DESC LIMIT 2",
                     (account["account_id"],),
                 ):
                     try:
@@ -1692,11 +1695,21 @@ class ApplicationServices:
                 usage.get("short_duration_minutes"),
                 usage.get("short_resets_at_s"),
             )
+        weekly = None
+        if usage and usage.get("weekly_duration_minutes"):
+            weekly = RawWindow(
+                str(usage.get("weekly_raw_slot") or "weekly"),
+                usage.get("weekly_used_percent_raw"),
+                usage.get("weekly_duration_minutes"),
+                usage.get("weekly_resets_at_s"),
+            )
+        exhausted = any(window and (window.used_percent or 0) >= 100 for window in (short, weekly))
         decision = decide_schedule(
             account_id=account["account_id"],
             enabled=bool(account["enabled"]),
             auth_verified=account["auth_state"] == "VERIFIED",
             short=short,
+            weekly=weekly,
             now_ms=self.clock.now_ms(),
             safety_delay_seconds=self.settings.activation_safety_delay_seconds,
             jitter_max_seconds=self.settings.activation_jitter_max_seconds,
@@ -1706,6 +1719,21 @@ class ApplicationServices:
             consistent_observations=observations,
             estimated_enabled=self.settings.estimated_schedule_enabled,
         )
+        if exhausted:
+            now = self.clock.now_ms()
+
+            def pause(connection: sqlite3.Connection) -> None:
+                connection.execute(
+                    "UPDATE activation_attempts SET state='CANCELLED',ambiguity_reason='Usage limit exhausted',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
+                    (now, now, account["account_id"]),
+                )
+                connection.execute(
+                    "UPDATE account_state SET activation_state='UNSCHEDULED',state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                    (now, account["account_id"]),
+                )
+
+            await self.database.transaction(pause)
+            return
         if not decision.window_key or decision.window_key in keys or not decision.run_at_ms:
             return
         if decision.basis_reset_at_s and any(
@@ -1874,9 +1902,11 @@ class ApplicationServices:
     ) -> None:
         def eligible(connection: sqlite3.Connection) -> bool:
             row = connection.execute(
-                "SELECT a.enabled,a.deleted_at_ms,s.auth_state,s.activation_state,aa.state "
+                "SELECT a.enabled,a.deleted_at_ms,s.auth_state,s.activation_state,aa.state,"
+                "u.short_used_percent_raw,u.weekly_used_percent_raw "
                 "FROM accounts a JOIN account_state s USING(account_id) "
                 "JOIN activation_attempts aa USING(account_id) "
+                "JOIN usage_current u USING(account_id) "
                 "WHERE a.account_id=? AND aa.activation_id=?",
                 (account["account_id"], activation_id),
             ).fetchone()
@@ -1887,6 +1917,8 @@ class ApplicationServices:
                 and row[2] == "VERIFIED"
                 and row[3] not in {"AMBIGUOUS", "SAFETY_BLOCKED"}
                 and row[4] in {"QUEUED", "THREAD_CREATED"}
+                and (row[5] is None or _integer(row[5]) < 100)
+                and (row[6] is None or _integer(row[6]) < 100)
             )
 
         try:

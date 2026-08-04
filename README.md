@@ -1,13 +1,13 @@
 # Codex Windowkeeper
 
-Windowkeeper is a single-instance supervisor for independently authenticated ChatGPT/Codex accounts. It reads authoritative short and weekly usage windows from the managed Codex app-server, schedules one evidence-backed activation per reset window, and makes ambiguous submissions visible instead of retrying blindly.
+Windowkeeper is a single-instance supervisor for independently authenticated ChatGPT/Codex accounts. It reads authoritative short and weekly usage windows from the managed Codex app-server, waits while either limit is exhausted, schedules one evidence-backed activation when usage returns, and makes genuinely ambiguous submissions visible instead of retrying blindly.
 
 ## What ships
 
 - Isolated runtime and encrypted managed credential lineage per account.
 - One-approval enrollment that refreshes the source twice into a managed credential and a downloadable `auth.json`.
 - Device-code sign-in (recommended), managed browser OAuth, and access/refresh-token import.
-- Immediate first-window activation, one in-flight activation per account, and reported-reset scheduling with a duration fallback when an idle reset moves forward on every poll.
+- Immediate first-window activation, one in-flight activation per account, automatic short/weekly limit recovery, and reported-reset scheduling with a duration fallback when an idle reset moves forward on every poll.
 - Activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
 - Durable operations, incidents, SSE updates, sanitized JSONL logs, and numbered, account-specific generic/Slack/Discord webhooks with causes and recovery steps.
