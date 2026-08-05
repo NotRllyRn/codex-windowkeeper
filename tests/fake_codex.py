@@ -185,6 +185,10 @@ for line in sys.stdin:
         ):
             send({"id": request_id, "error": {"code": "expensive_turn"}})
             continue
+        if marker(".turn-rejected") or marker(".turn-auth-rejected"):
+            code = "unauthorized" if marker(".turn-auth-rejected") else "usage_limit_reached"
+            send({"id": request_id, "error": {"code": code}})
+            continue
         send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})
         status = "failed" if marker(".turn-failed") else "completed"
         if status == "completed":

@@ -596,7 +596,7 @@ class ApplicationServices:
                     WHERE candidate.account_id=aa.account_id AND candidate.state='PLANNED'
                     AND candidate.scheduled_for_ms<=? ORDER BY candidate.scheduled_for_ms,candidate.created_at_ms LIMIT 1)
                 AND NOT EXISTS(SELECT 1 FROM activation_attempts active WHERE active.account_id=aa.account_id
-                    AND active.state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING'))
+                    AND active.state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING','AMBIGUOUS','SAFETY_BLOCKED'))
                 ORDER BY aa.scheduled_for_ms LIMIT ?""",
                 (now, now, self.settings.activation_concurrency),
             ).fetchall()
@@ -1657,7 +1657,7 @@ class ApplicationServices:
             )
             ambiguous = bool(
                 connection.execute(
-                    "SELECT 1 FROM activation_attempts WHERE account_id=? AND state IN('AMBIGUOUS','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING')",
+                    "SELECT 1 FROM activation_attempts WHERE account_id=? AND state IN('AMBIGUOUS','SAFETY_BLOCKED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING')",
                     (account["account_id"],),
                 ).fetchone()
             )
@@ -1703,7 +1703,6 @@ class ApplicationServices:
                 usage.get("weekly_duration_minutes"),
                 usage.get("weekly_resets_at_s"),
             )
-        exhausted = any(window and (window.used_percent or 0) >= 100 for window in (short, weekly))
         decision = decide_schedule(
             account_id=account["account_id"],
             enabled=bool(account["enabled"]),
@@ -1719,21 +1718,6 @@ class ApplicationServices:
             consistent_observations=observations,
             estimated_enabled=self.settings.estimated_schedule_enabled,
         )
-        if exhausted:
-            now = self.clock.now_ms()
-
-            def pause(connection: sqlite3.Connection) -> None:
-                connection.execute(
-                    "UPDATE activation_attempts SET state='CANCELLED',ambiguity_reason='Usage limit exhausted',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
-                    (now, now, account["account_id"]),
-                )
-                connection.execute(
-                    "UPDATE account_state SET activation_state='UNSCHEDULED',state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
-                    (now, account["account_id"]),
-                )
-
-            await self.database.transaction(pause)
-            return
         if not decision.window_key or decision.window_key in keys or not decision.run_at_ms:
             return
         if decision.basis_reset_at_s and any(
@@ -1743,7 +1727,12 @@ class ApplicationServices:
         activation_id = new_id()
         now = self.clock.now_ms()
 
-        def create(connection: sqlite3.Connection) -> None:
+        def create(connection: sqlite3.Connection) -> bool:
+            if connection.execute(
+                "SELECT 1 FROM activation_attempts WHERE account_id=? AND state IN('AMBIGUOUS','SAFETY_BLOCKED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING')",
+                (account["account_id"],),
+            ).fetchone():
+                return False
             connection.execute(
                 "INSERT INTO activation_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -1775,8 +1764,10 @@ class ApplicationServices:
                 "UPDATE account_state SET activation_state=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                 (f"{decision.confidence}_SCHEDULE", now, account["account_id"]),
             )
+            return True
 
-        await self.database.transaction(create)
+        if not await self.database.transaction(create):
+            return
         self.events.publish(
             "account.updated", {"resource_id": public, "next_activation_ms": decision.run_at_ms}
         )
@@ -1800,7 +1791,7 @@ class ApplicationServices:
 
         def create(connection: sqlite3.Connection) -> tuple[str, bool]:
             active = connection.execute(
-                "SELECT activation_id FROM activation_attempts WHERE account_id=? AND state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING') ORDER BY created_at_ms LIMIT 1",
+                "SELECT activation_id FROM activation_attempts WHERE account_id=? AND state IN('QUEUED','THREAD_CREATED','TURN_DISPATCHING','TURN_ACCEPTED','RUNNING','AMBIGUOUS','SAFETY_BLOCKED') ORDER BY created_at_ms LIMIT 1",
                 (account["account_id"],),
             ).fetchone()
             if active:
@@ -2007,34 +1998,73 @@ class ApplicationServices:
                     await self._complete_activation(account, activation_id, operation_id, result)
                 self.runtime.release_later(account["account_id"])
         except Exception as error:
-            not_eligible = False
-            if isinstance(error, WindowkeeperError):
-                not_eligible = error.code == "ACTIVATION_NOT_ELIGIBLE"
-            if not_eligible:
-                cancelled = await self.database.call(
-                    lambda connection: connection.execute(
-                        "SELECT state FROM activation_attempts WHERE activation_id=?",
-                        (activation_id,),
-                    ).fetchone()
+            await self._handle_activation_error(account, activation_id, operation_id, error)
+
+    async def _handle_activation_error(
+        self,
+        account: dict[str, Any],
+        activation_id: str,
+        operation_id: str,
+        error: Exception,
+    ) -> None:
+        not_eligible = (
+            isinstance(error, WindowkeeperError) and error.code == "ACTIVATION_NOT_ELIGIBLE"
+        )
+        if not_eligible:
+            now = self.clock.now_ms()
+
+            def pause_if_exhausted(connection: sqlite3.Connection) -> bool:
+                row = connection.execute(
+                    "SELECT aa.state,aa.schedule_confidence,u.short_used_percent_raw,u.weekly_used_percent_raw FROM activation_attempts aa JOIN usage_current u USING(account_id) WHERE aa.activation_id=?",
+                    (activation_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                exhausted = any(value is not None and _integer(value) >= 100 for value in row[2:])
+                if row[0] not in {"QUEUED", "THREAD_CREATED"} or not exhausted:
+                    return str(row[0]) == "CANCELLED"
+                connection.execute(
+                    "UPDATE activation_attempts SET state='PLANNED',upstream_thread_id=NULL,updated_at_ms=?,state_version=state_version+1 WHERE activation_id=?",
+                    (now, activation_id),
                 )
-                cancelled_state = cancelled[0] if cancelled else None
-                if cancelled_state == "CANCELLED":
-                    await self.runtime.stop(account["account_id"])
-                    return
-            safety_blocked = False
-            definitely_failed = False
-            if isinstance(error, WindowkeeperError):
-                safety_blocked = error.code == "ACTIVATION_SAFETY_VIOLATION"
-                definitely_failed = error.code == "ACTIVATION_UPSTREAM_FAILED"
-            await self._ambiguous_activation(
-                account,
-                activation_id,
-                operation_id,
-                str(error)[:200],
-                safety_blocked=safety_blocked,
-                definitely_failed=definitely_failed,
-            )
-            await self.runtime.stop(account["account_id"])
+                connection.execute(
+                    "DELETE FROM activation_operations WHERE activation_id=? AND state='STARTED'",
+                    (activation_id,),
+                )
+                connection.execute(
+                    "UPDATE operations SET state='CANCELLED',progress_code='USAGE_EXHAUSTED',progress_summary='Waiting for usage to reset',completed_at_ms=?,state_version=state_version+1 WHERE operation_id=?",
+                    (now, operation_id),
+                )
+                schedule_state = (
+                    "ESTIMATED_SCHEDULE" if str(row[1]) == "ESTIMATED" else "CONFIRMED_SCHEDULE"
+                )
+                connection.execute(
+                    "UPDATE account_state SET activation_state=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                    (schedule_state, now, account["account_id"]),
+                )
+                return True
+
+            if await self.database.transaction(pause_if_exhausted):
+                await self.runtime.stop(account["account_id"])
+                return
+        safety_blocked = False
+        definitely_failed = False
+        if isinstance(error, WindowkeeperError):
+            safety_blocked = error.code == "ACTIVATION_SAFETY_VIOLATION"
+            definitely_failed = error.code in {
+                "ACTIVATION_UPSTREAM_FAILED",
+                "CODEX_RPC_REJECTED",
+                "CODEX_AUTH_REQUIRED",
+            }
+        await self._ambiguous_activation(
+            account,
+            activation_id,
+            operation_id,
+            str(error)[:200],
+            safety_blocked=safety_blocked,
+            definitely_failed=definitely_failed,
+        )
+        await self.runtime.stop(account["account_id"])
 
     async def _await_turn(self, notifications: Any, turn_id: str) -> str:
         text = ""
@@ -2162,7 +2192,8 @@ class ApplicationServices:
                 "AMBIGUOUS"
                 if not definitely_failed
                 and row
-                and row[0] in {"TURN_DISPATCHING", "TURN_ACCEPTED", "RUNNING"}
+                and row[0]
+                in {"TURN_DISPATCHING", "TURN_ACCEPTED", "RUNNING", "AMBIGUOUS", "SAFETY_BLOCKED"}
                 else "FAILED_DEFINITE"
             )
             connection.execute(
