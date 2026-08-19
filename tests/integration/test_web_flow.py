@@ -332,24 +332,55 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         finally:
             auth_error_marker.unlink(missing_ok=True)
 
-        corrupt_marker = executable.with_suffix(".corrupt-on-rate-limits")
-        corrupt_marker.touch()
-        try:
-            checkpoint_failure = client.post(
-                f"/accounts/{account['public_token']}/refresh",
-                data={"csrf_token": csrf},
-                follow_redirects=False,
-            )
-            wait_for(client, "Failed", checkpoint_failure.headers["location"])
-            with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
-                assert (
-                    connection.execute("SELECT last_error_code FROM usage_current").fetchone()[0]
-                    == "CREDENTIAL_CHECKPOINT_FAILED"
-                )
-            assert list((tmp_path / "run" / "accounts").glob("*/*/codex-home/auth.json"))
-            assert "Credential Checkpoint" in client.get("/incidents").text
-        finally:
-            corrupt_marker.unlink(missing_ok=True)
+
+def test_checkpoint_failure_remains_blocked_after_restart(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "fake_codex.py"
+    executable = tmp_path / "fake_codex.py"
+    executable.write_bytes(source.read_bytes())
+    executable.chmod(0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        client.post(
+            "/accounts",
+            data={
+                "display_name": "Checkpoint failure",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        wait_for(client, "22%")
+        account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+        executable.with_suffix(".corrupt-on-rate-limits").touch()
+        checkpoint_failure = client.post(
+            f"/accounts/{account['public_token']}/refresh",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        wait_for(client, "Failed", checkpoint_failure.headers["location"])
+        assert list((tmp_path / "run" / "accounts").glob("*/*/codex-home/auth.json"))
+        assert "Credential Checkpoint" in client.get("/incidents").text
+        blocked = client.post(
+            f"/accounts/{account['public_token']}/refresh",
+            data={"csrf_token": csrf},
+        )
+        assert blocked.status_code == 409
+
+    with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+        connection.execute(
+            "UPDATE account_state SET worker_state='CREDENTIAL_IN_USE',auth_state='VERIFIED',overall_state='HEALTHY'"
+        )
+        connection.commit()
 
     with TestClient(create_app(settings)) as restarted:
         login = restarted.post("/login", data={"password": PASSWORD})
@@ -357,6 +388,11 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         account = restarted.get("/api/internal/v1/dashboard").json()["data"][0]
         assert account["auth_state"] == "AUTH_REQUIRED"
         assert account["overall_state"] == "ERROR"
+        blocked = restarted.post(
+            f"/accounts/{account['public_token']}/refresh",
+            data={"csrf_token": restarted.cookies["wk_csrf"]},
+        )
+        assert blocked.status_code == 409
         with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
             assert not connection.execute(
                 "SELECT 1 FROM activation_attempts WHERE state='PLANNED'"

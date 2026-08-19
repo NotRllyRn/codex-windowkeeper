@@ -345,7 +345,24 @@ class ApplicationServices:
     async def reconcile_startup(self) -> None:
         now = self.clock.now_ms()
 
-        def work(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+        def work(
+            connection: sqlite3.Connection,
+        ) -> tuple[list[dict[str, Any]], list[str]]:
+            checkpoint_accounts = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT account_id FROM account_state WHERE worker_state IN('CREDENTIAL_IN_USE','CREDENTIAL_QUARANTINED')"
+                )
+            ]
+            connection.execute(
+                "UPDATE account_state SET worker_state='CREDENTIAL_QUARANTINED',auth_state='AUTH_REQUIRED',activation_state='UNSCHEDULED',overall_state='ERROR',last_error_code='CREDENTIAL_CHECKPOINT_UNCERTAIN',last_error_summary='Service restarted before credential checkpoint completion',updated_at_ms=?,state_version=state_version+1 WHERE worker_state IN('CREDENTIAL_IN_USE','CREDENTIAL_QUARANTINED')",
+                (now,),
+            )
+            for account_id in checkpoint_accounts:
+                connection.execute(
+                    "UPDATE activation_attempts SET state='CANCELLED',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
+                    (now, now, account_id),
+                )
             uncertain = [
                 dict(row)
                 for row in connection.execute(
@@ -404,12 +421,19 @@ class ApplicationServices:
                 "UPDATE webhook_deliveries SET state='RETRY_SCHEDULED',lease_token=NULL,lease_expires_at_ms=NULL,next_attempt_at_ms=? WHERE state='LEASED'",
                 (now,),
             )
-            return uncertain
+            return uncertain, checkpoint_accounts
 
-        attempts = await self.database.transaction(work)
+        attempts, checkpoint_accounts = await self.database.transaction(work)
         reconciled = await asyncio.gather(
             *(self._reconcile_activation(attempt) for attempt in attempts)
         )
+        for account_id in checkpoint_accounts:
+            await self.open_incident(
+                account_id,
+                "credential_checkpoint",
+                "ERROR",
+                "Service restarted before credential checkpoint completion",
+            )
         for attempt, succeeded in zip(attempts, reconciled, strict=True):
             if not succeeded:
                 await self.open_incident(
@@ -914,6 +938,10 @@ class ApplicationServices:
 
         def work(connection: sqlite3.Connection) -> None:
             connection.execute(
+                "UPDATE account_state SET worker_state='STOPPED',updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND auth_state='AUTH_REQUIRED' AND worker_state='CREDENTIAL_QUARANTINED'",
+                (now, account["account_id"]),
+            )
+            connection.execute(
                 "INSERT INTO login_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     attempt_id,
@@ -1315,6 +1343,43 @@ class ApplicationServices:
     def _credential_lock(self, account_id: str) -> asyncio.Lock:
         return self._credential_locks.setdefault(account_id, asyncio.Lock())
 
+    async def _credential_use_started(self, account_id: str) -> None:
+        now = self.clock.now_ms()
+
+        def work(connection: sqlite3.Connection) -> None:
+            changed = connection.execute(
+                "UPDATE account_state SET worker_state='CREDENTIAL_IN_USE',updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND worker_state='STOPPED'",
+                (now, account_id),
+            ).rowcount
+            if not changed:
+                raise Conflict(
+                    "CREDENTIAL_RUNTIME_BLOCKED",
+                    "Credential recovery is required before another runtime can start",
+                )
+
+        await self.database.transaction(work)
+
+    async def _credential_use_finished(self, account_id: str, *, safe: bool) -> None:
+        now = self.clock.now_ms()
+
+        def work(connection: sqlite3.Connection) -> None:
+            if safe:
+                connection.execute(
+                    "UPDATE account_state SET worker_state='STOPPED',updated_at_ms=?,state_version=state_version+1 WHERE account_id=?",
+                    (now, account_id),
+                )
+                return
+            connection.execute(
+                "UPDATE account_state SET worker_state='CREDENTIAL_QUARANTINED',auth_state='AUTH_REQUIRED',activation_state='UNSCHEDULED',overall_state='ERROR',last_error_code='CREDENTIAL_CHECKPOINT_FAILED',last_error_summary='Credential recovery is required',updated_at_ms=?,state_version=state_version+1 WHERE account_id=?",
+                (now, account_id),
+            )
+            connection.execute(
+                "UPDATE activation_attempts SET state='CANCELLED',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
+                (now, now, account_id),
+            )
+
+        await self.database.transaction(work)
+
     def _replace_active_row(
         self, connection: sqlite3.Connection, envelope: Envelope, now: int
     ) -> None:
@@ -1420,9 +1485,14 @@ class ApplicationServices:
         account_id = str(account["account_id"])
         source = await self._credential_payload(account_id)
         source_fingerprint = self.vault.auth_fingerprint(source)
-        runtime = await self.runtime.start_fresh(
-            account_id, source, account.get("workspace_constraint")
-        )
+        await self._credential_use_started(account_id)
+        try:
+            runtime = await self.runtime.start_fresh(
+                account_id, source, account.get("workspace_constraint")
+            )
+        except BaseException:
+            await self._credential_use_finished(account_id, safe=True)
+            raise
         result: T | None = None
         primary_error: BaseException | None = None
         checkpoint_error: BaseException | None = None
@@ -1466,6 +1536,15 @@ class ApplicationServices:
             except BaseException as ignored:
                 del ignored
 
+        state_task = asyncio.create_task(
+            self._credential_use_finished(account_id, safe=checkpoint_error is None)
+        )
+        try:
+            cancellation = await self._await_critical(state_task)
+            primary_error = primary_error or cancellation
+        except BaseException as error:
+            checkpoint_error = checkpoint_error or error
+
         if checkpoint_error is not None:
             incident_task = asyncio.create_task(
                 self.open_incident(
@@ -1505,9 +1584,15 @@ class ApplicationServices:
         state: str,
         forbidden_fingerprints: set[str],
     ) -> tuple[dict[str, Any], bool]:
-        runtime = await self.runtime.start_fresh(
-            account["account_id"], source, account.get("workspace_constraint")
-        )
+        account_id = str(account["account_id"])
+        await self._credential_use_started(account_id)
+        try:
+            runtime = await self.runtime.start_fresh(
+                account_id, source, account.get("workspace_constraint")
+            )
+        except BaseException:
+            await self._credential_use_finished(account_id, safe=True)
+            raise
         try:
             expected = dict(account)
             expected["upstream_email"] = verify_identity(account, source_identity).get("email")
@@ -1539,6 +1624,9 @@ class ApplicationServices:
             discard_task = asyncio.create_task(self.runtime.discard(runtime))
             discard_cancellation = await self._await_critical(discard_task)
             cancellation = cancellation or discard_cancellation
+            state_task = asyncio.create_task(self._credential_use_finished(account_id, safe=True))
+            state_cancellation = await self._await_critical(state_task)
+            cancellation = cancellation or state_cancellation
             if cancellation:
                 raise cancellation
             return identity, installed
@@ -1550,13 +1638,17 @@ class ApplicationServices:
             except BaseException as ignored:
                 del ignored
                 close_failed = True
+            safe = state == "EXPORT" and not close_failed
             cleanup_task = asyncio.create_task(
-                self.runtime.preserve(runtime)
-                if close_failed or state == "ACTIVE"
-                else self.runtime.archive(runtime)
+                self.runtime.archive(runtime) if safe else self.runtime.preserve(runtime)
             )
             try:
                 await self._await_critical(cleanup_task)
+            except BaseException as ignored:
+                del ignored
+            state_task = asyncio.create_task(self._credential_use_finished(account_id, safe=safe))
+            try:
+                await self._await_critical(state_task)
             except BaseException as ignored:
                 del ignored
             raise primary_error
@@ -1599,6 +1691,11 @@ class ApplicationServices:
 
     async def refresh(self, public: str, trigger: str = "USER") -> str:
         account = await self._account_row(public)
+        if account["auth_state"] != "VERIFIED" or account["worker_state"] != "STOPPED":
+            raise Conflict(
+                "USAGE_REFRESH_NOT_ELIGIBLE",
+                "Credential recovery or reauthentication is required before usage refresh",
+            )
         now = self.clock.now_ms()
 
         def coalesce(connection: sqlite3.Connection) -> tuple[str, bool]:
