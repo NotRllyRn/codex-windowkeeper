@@ -149,12 +149,44 @@ def test_forked_credentials_must_match_the_managed_identity() -> None:
         verify_same_identity(
             managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-2"}}
         )
+
+
+def test_chatgpt_identity_accepts_nullable_email_but_rejects_mismatch() -> None:
+    assert (
+        verify_identity(
+            {"upstream_email": "owner@example.test"},
+            {"account": {"type": "chatgpt", "email": None, "planType": "pro"}},
+        )["planType"]
+        == "pro"
+    )
+    assert verify_identity({}, {"account": {"email": "legacy@example.test"}})["email"]
     with pytest.raises(WindowkeeperError) as reauthentication:
         verify_identity(
             {"upstream_email": "owner@example.test"},
-            {"account": {"email": "other@example.test"}},
+            {"account": {"type": "chatgpt", "email": "other@example.test"}},
         )
     assert reauthentication.value.code == "AUTH_IDENTITY_MISMATCH"
+    with pytest.raises(WindowkeeperError) as blank_email:
+        verify_identity(
+            {"upstream_email": "owner@example.test"},
+            {"account": {"type": "chatgpt", "email": ""}},
+        )
+    assert blank_email.value.code == "AUTH_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {"account": None},
+        {"account": {}},
+        {"account": {"planType": "pro"}},
+        {"account": {"type": "apiKey"}},
+    ),
+)
+def test_identity_still_rejects_missing_or_non_chatgpt_account(identity: dict[str, Any]) -> None:
+    with pytest.raises(WindowkeeperError) as unverifiable:
+        verify_identity({}, identity)
+    assert unverifiable.value.code == "AUTH_IDENTITY_UNVERIFIED"
 
 
 def test_redaction_is_recursive_and_sanitizes_urls() -> None:

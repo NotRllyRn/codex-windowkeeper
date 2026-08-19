@@ -203,13 +203,23 @@ def validate_callback(value: str, contract: BrowserContract, maximum_bytes: int 
 
 
 def verify_identity(account: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    observed = identity.get("account") or identity
-    if not isinstance(observed, dict) or not observed.get("email"):
+    observed = identity.get("account") if "account" in identity else identity
+    if (
+        not isinstance(observed, dict)
+        or not observed
+        or observed.get("type") not in (None, "chatgpt")
+        or (observed.get("type") is None and not observed.get("email"))
+    ):
         raise WindowkeeperError(
             "AUTH_IDENTITY_UNVERIFIED", "Codex did not return a verifiable ChatGPT identity", 409
         )
+    observed_email = observed.get("email")
     expected_email = account.get("upstream_email")
-    if expected_email and str(observed["email"]).casefold() != str(expected_email).casefold():
+    if (
+        expected_email
+        and observed_email is not None
+        and str(observed_email).casefold() != str(expected_email).casefold()
+    ):
         raise WindowkeeperError(
             "AUTH_IDENTITY_MISMATCH",
             "The authenticated ChatGPT identity does not match this account",
