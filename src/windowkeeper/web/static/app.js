@@ -137,13 +137,13 @@ if (operation) {
 		if (!response.ok) return;
 		const payload = await response.json();
 		if (
-			!["SUCCEEDED", "FAILED", "CANCELLED", "AMBIGUOUS"].includes(
+			["SUCCEEDED", "FAILED", "CANCELLED", "AMBIGUOUS"].includes(
 				payload.data.state,
 			)
 		) {
-			setTimeout(poll, 1200);
-		} else {
 			location.reload();
+		} else {
+			setTimeout(poll, 1200);
 		}
 	};
 	setTimeout(poll, 1200);
@@ -167,8 +167,7 @@ if (loginProgress) {
 			panel.hidden = false;
 			panel.querySelector("[data-verification]").href = data.verification_url;
 			panel.querySelector("[data-code]").textContent = data.user_code;
-			status.textContent =
-				"Enter the one-time code. Windowkeeper never logs it.";
+			status.textContent = "Enter the one-time code. Windowkeeper never logs it.";
 		} else {
 			const panel = loginProgress.querySelector("[data-browser]");
 			panel.hidden = false;
@@ -246,13 +245,10 @@ if (loginProgress) {
 		.querySelector("[data-cancel-login]")
 		?.addEventListener("click", async (event) => {
 			event.currentTarget.disabled = true;
-			await fetch(
-				appPath(`/api/internal/v1/login-attempts/${attempt}/cancel`),
-				{
-					method: "POST",
-					headers: { "X-CSRF-Token": csrf },
-				},
-			);
+			await fetch(appPath(`/api/internal/v1/login-attempts/${attempt}/cancel`), {
+				method: "POST",
+				headers: { "X-CSRF-Token": csrf },
+			});
 			location.assign(appPath("/"));
 		});
 
