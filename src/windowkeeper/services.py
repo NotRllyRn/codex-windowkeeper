@@ -108,6 +108,7 @@ class RuntimePort(Protocol):
     ) -> Any: ...
     async def get_existing(self, account_id: str) -> Any | None: ...
     async def discard(self, runtime: Any) -> None: ...
+    async def archive(self, runtime: Any) -> None: ...
     async def preserve(self, runtime: Any) -> None: ...
     async def stop(self, account_id: str) -> None: ...
 
@@ -1542,14 +1543,20 @@ class ApplicationServices:
                 raise cancellation
             return identity, installed
         except BaseException as primary_error:
+            close_failed = False
             close_task = asyncio.create_task(runtime.client.close())
             try:
                 await self._await_critical(close_task)
             except BaseException as ignored:
                 del ignored
-            preserve_task = asyncio.create_task(self.runtime.preserve(runtime))
+                close_failed = True
+            cleanup_task = asyncio.create_task(
+                self.runtime.preserve(runtime)
+                if close_failed or state == "ACTIVE"
+                else self.runtime.archive(runtime)
+            )
             try:
-                await self._await_critical(preserve_task)
+                await self._await_critical(cleanup_task)
             except BaseException as ignored:
                 del ignored
             raise primary_error
@@ -1685,22 +1692,24 @@ class ApplicationServices:
                 "UPDATE usage_current SET last_attempt_at_ms=?,stale=1,last_error_code=?,last_error_summary=?,state_version=state_version+1 WHERE account_id=?",
                 (now, error_code, summary, account["account_id"]),
             )
-            if auth_failure:
+            if auth_failure or checkpoint_failure:
                 connection.execute(
-                    "UPDATE account_state SET auth_state='AUTH_REQUIRED',usage_state='STALE',activation_state='UNSCHEDULED',overall_state='ACTION_REQUIRED',last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
-                    (error_code, summary, now, account["account_id"]),
+                    "UPDATE account_state SET auth_state='AUTH_REQUIRED',usage_state='STALE',activation_state='UNSCHEDULED',overall_state=?,last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                    (
+                        "ERROR" if checkpoint_failure else "ACTION_REQUIRED",
+                        error_code,
+                        summary,
+                        now,
+                        account["account_id"],
+                    ),
                 )
             else:
-                overall = (
-                    "ERROR"
-                    if checkpoint_failure
-                    else ("ACTION_REQUIRED" if action_required else "WARNING")
-                )
+                overall = "ACTION_REQUIRED" if action_required else "WARNING"
                 connection.execute(
                     "UPDATE account_state SET usage_state='STALE',overall_state=?,last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                     (overall, error_code, summary, now, account["account_id"]),
                 )
-            if auth_failure or action_required:
+            if auth_failure or action_required or checkpoint_failure:
                 connection.execute(
                     "UPDATE activation_attempts SET state='CANCELLED',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
                     (now, now, account["account_id"]),

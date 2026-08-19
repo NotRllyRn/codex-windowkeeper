@@ -128,8 +128,14 @@ class RuntimeManager:
         except FileNotFoundError as missing:
             del missing
 
+    async def archive(self, runtime: AccountRuntime) -> None:
+        """Detach stopped non-authoritative evidence without blocking the account."""
+        async with self._manager_lock:
+            if self._runtimes.get(runtime.account_id) is runtime:
+                self._runtimes.pop(runtime.account_id)
+
     async def preserve(self, runtime: AccountRuntime) -> None:
-        """Quarantine checkpoint evidence while retaining process ownership."""
+        """Quarantine authoritative checkpoint evidence while retaining ownership."""
         with suppress(BaseException):
             await runtime.client.close()
         async with self._manager_lock:

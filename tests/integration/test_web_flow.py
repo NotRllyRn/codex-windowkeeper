@@ -351,6 +351,117 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         finally:
             corrupt_marker.unlink(missing_ok=True)
 
+    with TestClient(create_app(settings)) as restarted:
+        login = restarted.post("/login", data={"password": PASSWORD})
+        restarted.cookies.update(login.cookies)
+        account = restarted.get("/api/internal/v1/dashboard").json()["data"][0]
+        assert account["auth_state"] == "AUTH_REQUIRED"
+        assert account["overall_state"] == "ERROR"
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert not connection.execute(
+                "SELECT 1 FROM activation_attempts WHERE state='PLANNED'"
+            ).fetchone()
+
+
+def test_export_failure_keeps_managed_account_usable(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "fake_codex.py"
+    executable = tmp_path / "fake_codex.py"
+    executable.write_bytes(source.read_bytes())
+    executable.chmod(0o700)
+    executable.with_suffix(".export-fail").touch()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        client.post(
+            "/accounts",
+            data={
+                "display_name": "Managed only",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        wait_for(client, "22%")
+        account = client.get("/api/internal/v1/dashboard").json()["data"][0]
+        assert account["auth_state"] == "VERIFIED"
+        executable.with_suffix(".rotate-on-rate-limits").touch()
+        refresh = client.post(
+            f"/accounts/{account['public_token']}/refresh",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        wait_for(client, "Succeeded", refresh.headers["location"])
+        assert bundle_auth(settings, "ACTIVE")["checkpoint"] == "rate-limits"
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM credential_bundles WHERE state='ACTIVE'"
+                ).fetchone()[0]
+                == 1
+            )
+            assert not connection.execute(
+                "SELECT 1 FROM credential_bundles WHERE state='EXPORT'"
+            ).fetchone()
+
+
+def test_managed_cancellation_checkpoints_before_returning(tmp_path: Path) -> None:
+    executable = Path(__file__).parents[1] / "fake_codex.py"
+    executable.chmod(0o700)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        client.post(
+            "/accounts",
+            data={
+                "display_name": "Cancelled operation",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        wait_for(client, "22%")
+        public = client.get("/api/internal/v1/dashboard").json()["data"][0]["public_token"]
+
+        async def run_cancelled_operation() -> str:
+            account = (await app.state.windowkeeper.services.account_detail(public))["account"]
+
+            async def mutate_then_cancel(runtime: Any) -> None:
+                path = runtime.codex_home / "auth.json"
+                value = json.loads(path.read_text(encoding="utf-8"))
+                value["checkpoint"] = "cancelled"
+                value["tokens"]["refresh_token"] = "cancelled-refresh"  # noqa: S105
+                path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+                raise asyncio.CancelledError
+
+            try:
+                await app.state.windowkeeper.services._run_managed(account, mutate_then_cancel)
+            except asyncio.CancelledError:
+                return "cancelled"
+            raise AssertionError("managed cancellation was not propagated")
+
+        assert client.portal
+        assert client.portal.call(run_cancelled_operation) == "cancelled"
+        assert bundle_auth(settings, "ACTIVE")["checkpoint"] == "cancelled"
+
 
 def test_managed_identity_mismatch_never_promotes_candidate(tmp_path: Path) -> None:
     source = Path(__file__).parents[1] / "fake_codex.py"

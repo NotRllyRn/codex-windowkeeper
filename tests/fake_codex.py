@@ -127,6 +127,9 @@ for line in sys.stdin:
             (home / "auth.json").write_text(
                 json.dumps(auth, separators=(",", ":")), encoding="utf-8"
             )
+            if marker(".export-fail") and refresh_number == 2:
+                send({"id": request_id, "error": {"code": -32000, "message": "export failed"}})
+                continue
         account = None
         if not marker(".account-none"):
             account = {
