@@ -203,21 +203,36 @@ def validate_callback(value: str, contract: BrowserContract, maximum_bytes: int 
 
 
 def verify_identity(account: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    observed = identity.get("account") if "account" in identity else identity
-    if (
-        not isinstance(observed, dict)
-        or not observed
-        or observed.get("type") not in (None, "chatgpt")
-        or (observed.get("type") is None and not observed.get("email"))
-    ):
+    if "account" in identity and identity["account"] is None:
         raise WindowkeeperError(
-            "AUTH_IDENTITY_UNVERIFIED", "Codex did not return a verifiable ChatGPT identity", 409
+            "CODEX_AUTH_REQUIRED",
+            "Codex authentication must be renewed",
+            409,
         )
+
+    observed = identity.get("account") if "account" in identity else identity
+
+    if not isinstance(observed, dict) or not observed:
+        raise WindowkeeperError(
+            "AUTH_IDENTITY_UNVERIFIED",
+            "Codex did not return a verifiable ChatGPT identity",
+            409,
+        )
+
+    observed_type = observed.get("type")
+    if observed_type not in (None, "chatgpt"):
+        raise WindowkeeperError(
+            "AUTH_IDENTITY_UNVERIFIED",
+            "Codex did not return a ChatGPT identity",
+            409,
+        )
+
     observed_email = observed.get("email")
     expected_email = account.get("upstream_email")
+
     if (
         expected_email
-        and observed_email is not None
+        and observed_email
         and str(observed_email).casefold() != str(expected_email).casefold()
     ):
         raise WindowkeeperError(
@@ -225,18 +240,21 @@ def verify_identity(account: dict[str, Any], identity: dict[str, Any]) -> dict[s
             "The authenticated ChatGPT identity does not match this account",
             409,
         )
+
     expected_workspace = account.get("workspace_constraint")
     observed_workspace = (
         observed.get("workspaceId")
         or observed.get("workspace_id")
         or observed.get("organizationId")
     )
+
     if expected_workspace and observed_workspace != expected_workspace:
         raise WindowkeeperError(
             "WORKSPACE_MISMATCH",
             "The authenticated account does not match the required workspace",
             409,
         )
+
     return observed
 
 

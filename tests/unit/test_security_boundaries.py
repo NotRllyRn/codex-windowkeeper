@@ -160,30 +160,30 @@ def test_chatgpt_identity_accepts_nullable_email_but_rejects_mismatch() -> None:
         == "pro"
     )
     assert verify_identity({}, {"account": {"email": "legacy@example.test"}})["email"]
+    assert verify_identity({}, {"account": {"planType": "pro"}})["planType"] == "pro"
+    assert (
+        verify_identity(
+            {"upstream_email": "owner@example.test"},
+            {"account": {"type": "chatgpt", "email": ""}},
+        )["email"]
+        == ""
+    )
     with pytest.raises(WindowkeeperError) as reauthentication:
         verify_identity(
             {"upstream_email": "owner@example.test"},
             {"account": {"type": "chatgpt", "email": "other@example.test"}},
         )
     assert reauthentication.value.code == "AUTH_IDENTITY_MISMATCH"
-    with pytest.raises(WindowkeeperError) as blank_email:
-        verify_identity(
-            {"upstream_email": "owner@example.test"},
-            {"account": {"type": "chatgpt", "email": ""}},
-        )
-    assert blank_email.value.code == "AUTH_IDENTITY_MISMATCH"
 
 
-@pytest.mark.parametrize(
-    "identity",
-    (
-        {"account": None},
-        {"account": {}},
-        {"account": {"planType": "pro"}},
-        {"account": {"type": "apiKey"}},
-    ),
-)
-def test_identity_still_rejects_missing_or_non_chatgpt_account(identity: dict[str, Any]) -> None:
+def test_missing_codex_account_requires_authentication() -> None:
+    with pytest.raises(WindowkeeperError) as missing:
+        verify_identity({}, {"account": None})
+    assert missing.value.code == "CODEX_AUTH_REQUIRED"
+
+
+@pytest.mark.parametrize("identity", ({"account": {}}, {"account": {"type": "apiKey"}}))
+def test_identity_still_rejects_empty_or_non_chatgpt_account(identity: dict[str, Any]) -> None:
     with pytest.raises(WindowkeeperError) as unverifiable:
         verify_identity({}, identity)
     assert unverifiable.value.code == "AUTH_IDENTITY_UNVERIFIED"
