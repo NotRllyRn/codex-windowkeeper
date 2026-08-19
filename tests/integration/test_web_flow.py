@@ -376,6 +376,7 @@ def test_checkpoint_failure_remains_blocked_after_restart(tmp_path: Path) -> Non
         )
         assert blocked.status_code == 409
 
+    executable.with_suffix(".corrupt-on-rate-limits").unlink(missing_ok=True)
     with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
         connection.execute(
             "UPDATE account_state SET worker_state='CREDENTIAL_IN_USE',auth_state='VERIFIED',overall_state='HEALTHY'"
@@ -397,6 +398,23 @@ def test_checkpoint_failure_remains_blocked_after_restart(tmp_path: Path) -> Non
             assert not connection.execute(
                 "SELECT 1 FROM activation_attempts WHERE state='PLANNED'"
             ).fetchone()
+        recovery = restarted.post(
+            f"/accounts/{account['public_token']}/reauthenticate",
+            data={
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": restarted.cookies["wk_csrf"],
+            },
+        )
+        assert recovery.status_code == 200
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            recovered = restarted.get("/api/internal/v1/dashboard").json()["data"][0]
+            if recovered["auth_state"] == "VERIFIED":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("explicit checkpoint recovery did not complete")
 
 
 def test_export_failure_keeps_managed_account_usable(tmp_path: Path) -> None:

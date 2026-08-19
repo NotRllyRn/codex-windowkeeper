@@ -78,7 +78,7 @@ destinations that no longer require this metadata.
 1. Stop automatic activity by disabling the affected account.
 2. Read the incident, operation history, and sanitized logs; retain IDs, timestamps, and error codes only.
 3. For `authentication_failed`, reauthenticate and verify the same upstream account/workspace.
-4. For `credential_checkpoint`, stop activity and preserve the quarantined runtime tree; it may contain newer credentials than SQLite.
+4. For `credential_checkpoint`, stop activity and preserve the quarantined runtime tree; it may contain newer credentials than SQLite. Restart only after preserving it, then use explicit reauthentication to establish a new managed lineage.
 5. For `activation_ambiguous` or `activation_safety`, inspect upstream thread/turn evidence. Windowkeeper never retries that window. Use **Acknowledge without retry** only after review; this permits future windows, not the ambiguous one.
 6. For Codex startup failures, rebuild the image and inspect `windowkeeper doctor` before restarting.
 7. For suspected key or host compromise, stop the service, preserve encrypted evidence, rotate credentials outside Windowkeeper, rotate the vault key, and revoke administrator sessions by resetting the password.

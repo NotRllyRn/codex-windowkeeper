@@ -918,8 +918,15 @@ class ApplicationServices:
         public: str,
         method: LoginMethod,
         session_token: str,
+        *,
+        recover_checkpoint: bool = False,
     ) -> dict[str, str]:
         account = await self._account_row(public)
+        if account["worker_state"] == "CREDENTIAL_QUARANTINED" and not recover_checkpoint:
+            raise Conflict(
+                "CREDENTIAL_RUNTIME_BLOCKED",
+                "Explicit reauthentication is required to recover this credential",
+            )
         if method == LoginMethod.MANUAL_TOKENS:
             raise Conflict(
                 "LOGIN_METHOD_UNAVAILABLE",
@@ -937,10 +944,11 @@ class ApplicationServices:
         now = self.clock.now_ms()
 
         def work(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                "UPDATE account_state SET worker_state='STOPPED',updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND auth_state='AUTH_REQUIRED' AND worker_state='CREDENTIAL_QUARANTINED'",
-                (now, account["account_id"]),
-            )
+            if recover_checkpoint:
+                connection.execute(
+                    "UPDATE account_state SET worker_state='STOPPED',updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND auth_state='AUTH_REQUIRED' AND worker_state='CREDENTIAL_QUARANTINED'",
+                    (now, account["account_id"]),
+                )
             connection.execute(
                 "INSERT INTO login_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (

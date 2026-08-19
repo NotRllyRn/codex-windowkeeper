@@ -533,7 +533,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "Manual token import is retired; use device code or browser sign-in",
                 409,
             )
-        started = await current.services.start_login(public, method, token)
+        started = await current.services.start_login(public, method, token, recover_checkpoint=True)
         return _security_headers(
             render(
                 "login_progress.html",
