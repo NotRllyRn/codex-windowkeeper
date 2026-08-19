@@ -4,8 +4,9 @@ import json
 import logging
 import secrets
 import sqlite3
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -19,10 +20,10 @@ from .domain.usage import normalize_usage
 from .errors import Conflict, WindowkeeperError
 from .ids import new_id, public_token
 from .redaction import redact
-from .secret_types import Secret
 from .security import digest
 from .vault import Envelope, Vault
 
+T = TypeVar("T")
 PROMPT = 'Respond with exactly "OK" and perform no other actions.'
 PROMPT_DIGEST = hashlib.sha256(PROMPT.encode()).digest()
 INCIDENT_GUIDANCE = {
@@ -36,7 +37,11 @@ INCIDENT_GUIDANCE = {
     ),
     "authentication_failed": (
         "Codex rejected or could not refresh the account credential, so usage refresh and activation cannot continue.",
-        "Open the account and use Replace or repair credentials with device code, browser sign-in, or valid pasted tokens.",
+        "Open the account and use Replace or repair credentials with device code or browser sign-in.",
+    ),
+    "credential_checkpoint": (
+        "Codex may have changed its credential, but Windowkeeper could not safely persist the result.",
+        "Stop account activity and preserve the quarantined runtime before restarting or reauthenticating.",
     ),
 }
 
@@ -95,9 +100,16 @@ class EventPort(Protocol):
 
 
 class RuntimePort(Protocol):
-    async def use(self, account_id: str, payload: dict[str, Any] | None = None) -> Any: ...
+    async def start_fresh(
+        self,
+        account_id: str,
+        payload: dict[str, Any] | None = None,
+        workspace_constraint: str | None = None,
+    ) -> Any: ...
+    async def get_existing(self, account_id: str) -> Any | None: ...
+    async def discard(self, runtime: Any) -> None: ...
+    async def preserve(self, runtime: Any) -> None: ...
     async def stop(self, account_id: str) -> None: ...
-    def release_later(self, account_id: str) -> None: ...
 
 
 class WebhookPort(Protocol):
@@ -203,82 +215,32 @@ def validate_callback(value: str, contract: BrowserContract, maximum_bytes: int 
 
 
 def verify_identity(account: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    if "account" in identity and identity["account"] is None:
+    if "account" not in identity or identity["account"] is None:
         raise WindowkeeperError(
             "CODEX_AUTH_REQUIRED",
             "Codex authentication must be renewed",
             409,
         )
-
-    observed = identity.get("account") if "account" in identity else identity
-
-    if not isinstance(observed, dict) or not observed:
-        raise WindowkeeperError(
-            "AUTH_IDENTITY_UNVERIFIED",
-            "Codex did not return a verifiable ChatGPT identity",
-            409,
-        )
-
-    observed_type = observed.get("type")
-    if observed_type not in (None, "chatgpt"):
+    observed = identity["account"]
+    if not isinstance(observed, dict) or observed.get("type") != "chatgpt":
         raise WindowkeeperError(
             "AUTH_IDENTITY_UNVERIFIED",
             "Codex did not return a ChatGPT identity",
             409,
         )
-
-    observed_email = observed.get("email")
     expected_email = account.get("upstream_email")
-
+    observed_email = observed.get("email")
     if (
         expected_email
         and observed_email
-        and str(observed_email).casefold() != str(expected_email).casefold()
+        and str(expected_email).casefold() != str(observed_email).casefold()
     ):
         raise WindowkeeperError(
             "AUTH_IDENTITY_MISMATCH",
             "The authenticated ChatGPT identity does not match this account",
             409,
         )
-
-    expected_workspace = account.get("workspace_constraint")
-    observed_workspace = (
-        observed.get("workspaceId")
-        or observed.get("workspace_id")
-        or observed.get("organizationId")
-    )
-
-    if expected_workspace and observed_workspace != expected_workspace:
-        raise WindowkeeperError(
-            "WORKSPACE_MISMATCH",
-            "The authenticated account does not match the required workspace",
-            409,
-        )
-
     return observed
-
-
-def verify_same_identity(managed: dict[str, Any], exported: dict[str, Any]) -> None:
-    managed_account = managed.get("account") or managed
-    exported_account = exported.get("account") or exported
-    managed_email = str(managed_account.get("email", "")).casefold()
-    exported_email = str(exported_account.get("email", "")).casefold()
-    managed_workspace = (
-        managed_account.get("workspaceId")
-        or managed_account.get("workspace_id")
-        or managed_account.get("organizationId")
-    )
-    exported_workspace = (
-        exported_account.get("workspaceId")
-        or exported_account.get("workspace_id")
-        or exported_account.get("organizationId")
-    )
-    if managed_email != exported_email or managed_workspace != exported_workspace:
-        raise WindowkeeperError(
-            "AUTH_EXPORT_IDENTITY_MISMATCH",
-            "The downloadable credential must use the same ChatGPT account and workspace",
-            409,
-        )
 
 
 def _integer(value: Any) -> int:
@@ -365,6 +327,7 @@ class ApplicationServices:
         self.clock = SystemClock()
         self.interactions: dict[str, StoredInteraction] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._login_tasks: dict[str, asyncio.Task[Any]] = {}
         self._usage_semaphore = asyncio.Semaphore(settings.usage_refresh_concurrency)
         self._auth_semaphore = asyncio.Semaphore(settings.auth_concurrency)
         self._activation_semaphore = asyncio.Semaphore(settings.activation_concurrency)
@@ -372,10 +335,11 @@ class ApplicationServices:
         self._credential_locks: dict[str, asyncio.Lock] = {}
         self.log = logging.getLogger("windowkeeper.services")
 
-    def _background(self, coroutine: Any) -> None:
+    def _background(self, coroutine: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     async def reconcile_startup(self) -> None:
         now = self.clock.now_ms()
@@ -384,7 +348,7 @@ class ApplicationServices:
             uncertain = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT aa.activation_id,aa.account_id,aa.upstream_thread_id,aa.upstream_turn_id,aa.client_user_message_id,a.public_token,(SELECT operation_id FROM operations o WHERE o.account_id=aa.account_id AND o.kind='activation.run' ORDER BY o.created_at_ms DESC LIMIT 1) AS operation_id FROM activation_attempts aa JOIN accounts a USING(account_id) WHERE aa.state IN('TURN_DISPATCHING','TURN_ACCEPTED','RUNNING')"
+                    "SELECT aa.activation_id,aa.account_id,aa.upstream_thread_id,aa.upstream_turn_id,aa.client_user_message_id,a.public_token,a.workspace_constraint,(SELECT operation_id FROM operations o WHERE o.account_id=aa.account_id AND o.kind='activation.run' ORDER BY o.created_at_ms DESC LIMIT 1) AS operation_id FROM activation_attempts aa JOIN accounts a USING(account_id) WHERE aa.state IN('TURN_DISPATCHING','TURN_ACCEPTED','RUNNING')"
                 )
             ]
             connection.execute(
@@ -462,12 +426,12 @@ class ApplicationServices:
         account = {
             "account_id": str(attempt["account_id"]),
             "public_token": str(attempt["public_token"]),
+            "workspace_constraint": attempt.get("workspace_constraint"),
         }
         try:
-            payload = await self._credential_payload(account["account_id"])
-            runtime = await self.runtime.use(account["account_id"], payload)
-            async with runtime.lock:
-                evidence = await runtime.adapter.read_thread(str(thread_id))
+            evidence = await self._run_managed(
+                account, lambda runtime: runtime.adapter.read_thread(str(thread_id))
+            )
             reconciled = _reconciled_result(
                 evidence,
                 str(attempt["upstream_turn_id"]) if attempt.get("upstream_turn_id") else None,
@@ -483,8 +447,6 @@ class ApplicationServices:
                 },
             )
             return False
-        finally:
-            await self.runtime.stop(account["account_id"])
         if not reconciled:
             return False
         result, unsafe = reconciled
@@ -931,20 +893,12 @@ class ApplicationServices:
         public: str,
         method: LoginMethod,
         session_token: str,
-        access_token: Secret | None = None,
-        refresh_token: Secret | None = None,
     ) -> dict[str, str]:
         account = await self._account_row(public)
-        if method == LoginMethod.MANUAL_TOKENS and (
-            not access_token
-            or not refresh_token
-            or not access_token.reveal().strip()
-            or not refresh_token.reveal().strip()
-            or len(access_token.reveal()) > 65_536
-            or len(refresh_token.reveal()) > 65_536
-        ):
-            raise WindowkeeperError(
-                "MANUAL_TOKENS_INVALID", "Enter an access token and refresh token", 422
+        if method == LoginMethod.MANUAL_TOKENS:
+            raise Conflict(
+                "LOGIN_METHOD_UNAVAILABLE",
+                "Manual token import is retired; use device code or browser sign-in",
             )
         if method == LoginMethod.CHATGPT_BROWSER and self.settings.browser_oauth_mode == "disabled":
             raise Conflict(
@@ -1007,7 +961,7 @@ class ApplicationServices:
             raise WindowkeeperError(
                 code, "Sign-in could not be recorded; apply database migrations and retry", 500
             ) from error
-        self._background(
+        task = self._background(
             self._run_login(
                 account,
                 operation_id,
@@ -1015,10 +969,10 @@ class ApplicationServices:
                 method,
                 session_token,
                 nonce,
-                access_token,
-                refresh_token,
             )
         )
+        self._login_tasks[attempt_id] = task
+        task.add_done_callback(lambda _task: self._login_tasks.pop(attempt_id, None))
         return {
             "operation_id": operation_id,
             "login_attempt_id": attempt_id,
@@ -1033,74 +987,90 @@ class ApplicationServices:
         method: LoginMethod,
         session_token: str,
         nonce: str,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        await self.runtime.stop(account["account_id"])
-        runtime = await self.runtime.use(account["account_id"])
-        async with runtime.lock:
-            await self._login_state(attempt_id, "STARTING_LOGIN")
-            interaction = await runtime.adapter.start_login(method)
-        contract = (
-            browser_contract(
-                interaction.auth_url.reveal(),
-                self.settings.callback_ports,
-                self.settings.browser_callback_max_bytes,
+    ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        runtime = await self.runtime.start_fresh(
+            account["account_id"], workspace_constraint=account.get("workspace_constraint")
+        )
+        authenticated = False
+        try:
+            async with runtime.lock:
+                await self._login_state(attempt_id, "STARTING_LOGIN")
+                interaction = await runtime.adapter.start_login(method)
+            contract = (
+                browser_contract(
+                    interaction.auth_url.reveal(),
+                    self.settings.callback_ports,
+                    self.settings.browser_callback_max_bytes,
+                )
+                if interaction.auth_url
+                else None
             )
-            if interaction.auth_url
-            else None
-        )
-        callback_mode = (
-            "AUTOMATIC_LOOPBACK"
-            if contract and self.settings.browser_oauth_mode == "host-loopback"
-            else ("MANUAL_FORWARD" if contract else None)
-        )
-        self.interactions[attempt_id] = StoredInteraction(
-            attempt_id, digest(session_token), digest(nonce), interaction, contract
-        )
-        now = self.clock.now_ms()
+            callback_mode = (
+                "AUTOMATIC_LOOPBACK"
+                if contract and self.settings.browser_oauth_mode == "host-loopback"
+                else ("MANUAL_FORWARD" if contract else None)
+            )
+            self.interactions[attempt_id] = StoredInteraction(
+                attempt_id, digest(session_token), digest(nonce), interaction, contract
+            )
+            now = self.clock.now_ms()
 
-        def ready(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                "UPDATE login_attempts SET state='WAITING_FOR_USER',upstream_login_id=?,callback_port=?,callback_mode=?,started_at_ms=?,updated_at_ms=? WHERE login_attempt_id=?",
-                (
-                    interaction.login_id,
-                    contract.port if contract else None,
-                    callback_mode,
-                    now,
-                    now,
-                    attempt_id,
-                ),
-            )
-            connection.execute(
-                "UPDATE operations SET state='WAITING_FOR_USER',progress_code='WAITING_FOR_USER',progress_summary='Complete ChatGPT sign-in',state_version=state_version+1 WHERE operation_id=?",
-                (operation_id,),
-            )
+            def ready(connection: sqlite3.Connection) -> None:
+                changed = connection.execute(
+                    "UPDATE login_attempts SET state='WAITING_FOR_USER',upstream_login_id=?,callback_port=?,callback_mode=?,started_at_ms=?,updated_at_ms=? WHERE login_attempt_id=? AND state='STARTING_LOGIN'",
+                    (
+                        interaction.login_id,
+                        contract.port if contract else None,
+                        callback_mode,
+                        now,
+                        now,
+                        attempt_id,
+                    ),
+                ).rowcount
+                if not changed:
+                    raise Conflict("LOGIN_CANCELLED", "Sign-in was cancelled before interaction")
+                connection.execute(
+                    "UPDATE operations SET state='WAITING_FOR_USER',progress_code='WAITING_FOR_USER',progress_summary='Complete ChatGPT sign-in',state_version=state_version+1 WHERE operation_id=?",
+                    (operation_id,),
+                )
 
-        await self.database.transaction(ready)
-        self.events.publish(
-            "login.updated",
-            {
-                "attempt_id": attempt_id,
-                "account_id": account["public_token"],
-                "state": "WAITING_FOR_USER",
-                "interaction_ready": True,
-            },
-        )
-        await self._await_login_completion(
-            runtime.adapter.client.notifications(), interaction.login_id
-        )
-        self.interactions.pop(attempt_id, None)
-        await self._login_state(attempt_id, "VERIFYING_ACCOUNT")
-        async with runtime.lock:
-            identity = await runtime.adapter.account()
-            verify_identity(account, identity)
+            await self.database.transaction(ready)
+            self.events.publish(
+                "login.updated",
+                {
+                    "attempt_id": attempt_id,
+                    "account_id": account["public_token"],
+                    "state": "WAITING_FOR_USER",
+                    "interaction_ready": True,
+                },
+            )
+            await self._await_login_completion(
+                runtime.adapter.client.notifications(), interaction.login_id
+            )
+            authenticated = True
+            self.interactions.pop(attempt_id, None)
+            if not await self._login_state(
+                attempt_id, "VERIFYING_ACCOUNT", expected="WAITING_FOR_USER"
+            ):
+                raise Conflict("LOGIN_CANCELLED", "Sign-in was cancelled before verification")
+            async with runtime.lock:
+                identity = await runtime.adapter.account()
+                verify_identity(account, identity)
+                await runtime.client.close()
+                payload = self.vault.capture(
+                    runtime.codex_home,
+                    self.settings.codex_version,
+                    account.get("workspace_constraint"),
+                )
+            return runtime, identity, payload
+        except BaseException:
+            self.interactions.pop(attempt_id, None)
             await runtime.client.close()
-            payload = self.vault.capture(
-                runtime.codex_home,
-                self.settings.codex_version,
-                account.get("workspace_constraint"),
-            )
-        await self.runtime.stop(account["account_id"])
-        return identity, payload
+            if authenticated:
+                await self.runtime.preserve(runtime)
+            else:
+                await self.runtime.discard(runtime)
+            raise
 
     async def _run_login(
         self,
@@ -1110,72 +1080,70 @@ class ApplicationServices:
         method: LoginMethod,
         session_token: str,
         nonce: str,
-        access_token: Secret | None = None,
-        refresh_token: Secret | None = None,
     ) -> None:
         lock = self._browser_login_lock if method == LoginMethod.CHATGPT_BROWSER else asyncio.Lock()
         try:
-            async with self._auth_semaphore, lock:
+            async with self._auth_semaphore, lock, self._credential_lock(account["account_id"]):
                 await self._operation_state(
                     operation_id, "RUNNING", "STARTING_RUNTIME", "Starting isolated Codex runtime"
                 )
                 await self._login_state(attempt_id, "STARTING_RUNTIME")
-                source_identity: dict[str, Any] | None = None
-                if method == LoginMethod.MANUAL_TOKENS:
-                    if not access_token or not refresh_token:
-                        raise WindowkeeperError(
-                            "MANUAL_TOKENS_INVALID", "Enter an access token and refresh token", 422
-                        )
-                    source = self.vault.imported_tokens(
-                        access_token.reveal().strip(),
-                        refresh_token.reveal().strip(),
-                        self.settings.codex_version,
-                        account.get("workspace_constraint"),
-                    )
-                else:
-                    source_identity, source = await self._capture_login(
-                        account, operation_id, attempt_id, method, session_token, nonce
-                    )
-                await self._login_state(attempt_id, "FORKING_CREDENTIALS")
-                self.events.publish(
-                    "login.updated",
-                    {
-                        "attempt_id": attempt_id,
-                        "account_id": account["public_token"],
-                        "state": "FORKING_CREDENTIALS",
-                    },
+                source_runtime, source_identity, source = await self._capture_login(
+                    account, operation_id, attempt_id, method, session_token, nonce
                 )
-                async with self._credential_lock(account["account_id"]):
-                    identity, managed, exported = await self._fork_credentials(account, source)
-                    if source_identity:
-                        verify_same_identity(source_identity, identity)
-                    usage = await self._read_usage(account["account_id"], managed)
-                    await self._commit_login(
-                        account,
-                        operation_id,
-                        attempt_id,
-                        method,
-                        identity,
-                        usage,
-                        self.vault.encrypt(account["account_id"], managed),
-                        self.vault.encrypt(account["account_id"], exported),
-                    )
-        except asyncio.CancelledError as cancellation:
-            del cancellation
-            await self._fail_login(
-                attempt_id,
-                operation_id,
-                "RESTART_REQUIRED",
-                "LOGIN_RESTART_REQUIRED",
-                "Sign-in was interrupted",
+                promotion_task = asyncio.create_task(
+                    self._promote_login_source(account["account_id"], attempt_id, source)
+                )
+                try:
+                    cancellation = await self._await_critical(promotion_task)
+                    promoted = promotion_task.result()
+                except BaseException:
+                    preserve_task = asyncio.create_task(self.runtime.preserve(source_runtime))
+                    await self._await_critical(preserve_task)
+                    raise
+                if not promoted:
+                    preserve_task = asyncio.create_task(self.runtime.preserve(source_runtime))
+                    await self._await_critical(preserve_task)
+                    raise Conflict("LOGIN_CANCELLED", "Sign-in was cancelled before checkpointing")
+                discard_task = asyncio.create_task(self.runtime.discard(source_runtime))
+                discard_cancellation = await self._await_critical(discard_task)
+                cancellation = cancellation or discard_cancellation
+                if cancellation:
+                    raise cancellation
+                identity, _, export_error = await self._fork_credentials(
+                    account, source, source_identity
+                )
+                export_available = bool(await self._bundle_payload(account["account_id"], "EXPORT"))
+                await self._commit_login(
+                    account,
+                    operation_id,
+                    attempt_id,
+                    method,
+                    identity,
+                    export_available,
+                    export_error,
+                )
+            await self.refresh(account["public_token"], "LOGIN")
+        except asyncio.CancelledError:
+            state = await self.database.call(
+                lambda connection: connection.execute(
+                    "SELECT state FROM login_attempts WHERE login_attempt_id=?", (attempt_id,)
+                ).fetchone()
             )
+            if not state or state[0] != "CANCELLED":
+                await self._fail_login(
+                    attempt_id,
+                    operation_id,
+                    "RESTART_REQUIRED",
+                    "LOGIN_RESTART_REQUIRED",
+                    "Sign-in was interrupted",
+                )
+            raise
         except WindowkeeperError as error:
             self.log.warning("login rejected", extra={"event": "login.rejected"})
             action_required = error.code in {
-                "WORKSPACE_MISMATCH",
                 "AUTH_IDENTITY_UNVERIFIED",
                 "AUTH_IDENTITY_MISMATCH",
-                "AUTH_EXPORT_IDENTITY_MISMATCH",
                 "CODEX_BROWSER_AUTH_CONTRACT_CHANGED",
             }
             await self._fail_login(
@@ -1185,7 +1153,6 @@ class ApplicationServices:
                 error.code,
                 error.detail,
             )
-            await self.runtime.stop(account["account_id"])
         except Exception as error:
             self.log.warning("login failed", extra={"event": "login.failed"})
             await self._fail_login(
@@ -1193,11 +1160,8 @@ class ApplicationServices:
                 operation_id,
                 "FAILED_RETRYABLE",
                 "LOGIN_FAILED",
-                "Imported tokens could not be validated"
-                if method == LoginMethod.MANUAL_TOKENS
-                else str(error)[:200],
+                str(error)[:200],
             )
-            await self.runtime.stop(account["account_id"])
 
     async def _await_login_completion(self, notifications: Any, login_id: str) -> None:
         async with asyncio.timeout(self.settings.login_timeout_seconds):
@@ -1279,24 +1243,31 @@ class ApplicationServices:
                 "LOGIN_INTERACTION_SESSION_MISMATCH", "This sign-in belongs to another session", 403
             )
 
-        def read(connection: sqlite3.Connection) -> dict[str, Any] | None:
+        def request_cancel(connection: sqlite3.Connection) -> dict[str, Any] | None:
             row = connection.execute(
                 "SELECT * FROM login_attempts WHERE login_attempt_id=?", (attempt_id,)
             ).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            changed = connection.execute(
+                "UPDATE login_attempts SET state='CANCEL_REQUESTED',updated_at_ms=? WHERE login_attempt_id=? AND state IN('CREATED','STARTING_RUNTIME','STARTING_LOGIN','WAITING_FOR_USER','OAUTH_COMPLETED','VERIFYING_ACCOUNT')",
+                (self.clock.now_ms(), attempt_id),
+            ).rowcount
+            return dict(row) if changed else None
 
-        attempt = await self.database.call(read)
+        attempt = await self.database.transaction(request_cancel)
         if not attempt:
-            raise WindowkeeperError("LOGIN_NOT_FOUND", "Sign-in attempt not found", 404)
+            raise Conflict("LOGIN_NOT_CANCELLABLE", "Sign-in is no longer cancellable")
         operation_id = await self._create_operation(attempt["account_id"], "login.cancel")
         self.interactions.pop(attempt_id, None)
-        await self._login_state(attempt_id, "CANCEL_REQUESTED")
         self._background(self._cancel_login_runtime(attempt, operation_id))
         return operation_id
 
     async def _cancel_login_runtime(self, attempt: dict[str, Any], operation_id: str) -> None:
         try:
-            runtime = await self.runtime.use(attempt["account_id"])
+            runtime = await self.runtime.get_existing(attempt["account_id"])
+            if runtime is None:
+                raise Conflict("LOGIN_RUNTIME_GONE", "The sign-in runtime is no longer available")
             async with runtime.lock:
                 await runtime.adapter.cancel_login(attempt["upstream_login_id"])
             await self._login_state(attempt["login_attempt_id"], "CANCELLED")
@@ -1304,10 +1275,11 @@ class ApplicationServices:
                 attempt["operation_id"], "CANCELLED", "CANCELLED", "Sign-in cancelled"
             )
             await self._operation_state(operation_id, "SUCCEEDED", "CANCELLED", "Sign-in cancelled")
+            if task := self._login_tasks.get(str(attempt["login_attempt_id"])):
+                task.cancel()
         except Exception as error:
+            await self._login_state(attempt["login_attempt_id"], "FAILED_RETRYABLE")
             await self._fail_operation(operation_id, "LOGIN_CANCEL_FAILED", str(error)[:200])
-        finally:
-            await self.runtime.stop(attempt["account_id"])
 
     async def _bundle_payload(self, account_id: str, state: str) -> dict[str, Any] | None:
         def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
@@ -1339,94 +1311,76 @@ class ApplicationServices:
             raise Conflict("AUTH_REQUIRED", "The account must be authenticated first")
         return payload
 
-    def _token_pair(self, payload: dict[str, Any]) -> tuple[str, str]:
-        try:
-            value = json.loads(self.vault.auth_json(payload))
-        except (TypeError, ValueError) as error:
-            raise WindowkeeperError(
-                "CODEX_REFRESH_CONTRACT_CHANGED", "Codex auth.json is not readable"
-            ) from error
-        tokens = value.get("tokens") or value
-        access = tokens.get("access_token")
-        refresh = tokens.get("refresh_token")
-        if not isinstance(access, str) or not isinstance(refresh, str) or not access or not refresh:
-            raise WindowkeeperError(
-                "CODEX_REFRESH_CONTRACT_CHANGED", "Codex auth.json has no refreshable token pair"
-            )
-        return access, refresh
-
-    async def _refresh_payload(
-        self, account: dict[str, Any], source: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        source_refresh = self._token_pair(source)[1]
-        await self.runtime.stop(account["account_id"])
-        runtime = await self.runtime.use(account["account_id"], source)
-        try:
-            async with runtime.lock:
-                identity = await runtime.adapter.account(refresh_token=True)
-                verify_identity(account, identity)
-                await runtime.client.close()
-                refreshed = self.vault.capture(
-                    runtime.codex_home,
-                    self.settings.codex_version,
-                    source.get("workspace_constraint"),
-                )
-        finally:
-            await self.runtime.stop(account["account_id"])
-        if self._token_pair(refreshed)[1] == source_refresh:
-            raise WindowkeeperError(
-                "CODEX_TOKEN_NOT_ROTATED", "Codex did not rotate the OAuth credential"
-            )
-        return identity, refreshed
-
     def _credential_lock(self, account_id: str) -> asyncio.Lock:
         return self._credential_locks.setdefault(account_id, asyncio.Lock())
 
-    async def _fork_credentials(
-        self, account: dict[str, Any], source: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        managed_identity, managed = await self._refresh_payload(account, source)
-        exported_identity, exported = await self._refresh_payload(account, source)
-        verify_same_identity(managed_identity, exported_identity)
-        if self._token_pair(managed)[1] == self._token_pair(exported)[1]:
-            raise WindowkeeperError(
-                "CODEX_TOKEN_FORK_FAILED", "Codex returned the same OAuth credential twice"
-            )
-        return managed_identity, managed, exported
-
-    async def _read_usage(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        runtime = await self.runtime.use(account_id, payload)
-        try:
-            async with runtime.lock:
-                result = await runtime.adapter.rate_limits()
-        except Exception:
-            await self.runtime.stop(account_id)
-            raise
-        self.runtime.release_later(account_id)
-        return dict(result)
-
-    def _replace_bundle_rows(
-        self,
-        connection: sqlite3.Connection,
-        managed: Envelope,
-        exported: Envelope,
-        now: int,
+    def _replace_active_row(
+        self, connection: sqlite3.Connection, envelope: Envelope, now: int
     ) -> None:
         connection.execute(
             "UPDATE credential_bundles SET state='RETIRED',retired_at_ms=? WHERE account_id=? AND state='ACTIVE'",
-            (now, managed.account_id),
+            (now, envelope.account_id),
         )
         connection.execute(
-            "DELETE FROM credential_bundles WHERE account_id=? AND state='EXPORT'",
-            (managed.account_id,),
+            "INSERT INTO credential_bundles VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                envelope.bundle_id,
+                envelope.account_id,
+                "ACTIVE",
+                envelope.envelope_version,
+                envelope.payload_schema_version,
+                envelope.key_id,
+                envelope.nonce,
+                envelope.ciphertext,
+                envelope.aad,
+                self.settings.codex_version,
+                now,
+                now,
+                None,
+            ),
         )
-        for envelope, state in ((managed, "ACTIVE"), (exported, "EXPORT")):
+
+    async def _promote_active_payload(self, account_id: str, payload: dict[str, Any]) -> None:
+        envelope = self.vault.encrypt(account_id, payload)
+        now = self.clock.now_ms()
+        await self.database.transaction(
+            lambda connection: self._replace_active_row(connection, envelope, now)
+        )
+
+    async def _promote_login_source(
+        self, account_id: str, attempt_id: str, payload: dict[str, Any]
+    ) -> bool:
+        envelope = self.vault.encrypt(account_id, payload)
+        now = self.clock.now_ms()
+
+        def work(connection: sqlite3.Connection) -> bool:
+            changed = connection.execute(
+                "UPDATE login_attempts SET state='CHECKPOINTING_CREDENTIAL',updated_at_ms=? WHERE login_attempt_id=? AND state='VERIFYING_ACCOUNT'",
+                (now, attempt_id),
+            ).rowcount
+            if not changed:
+                return False
+            self._replace_active_row(connection, envelope, now)
+            return True
+
+        return await self.database.transaction(work)
+
+    async def _install_export_payload(self, account_id: str, payload: dict[str, Any]) -> bool:
+        envelope = self.vault.encrypt(account_id, payload)
+        now = self.clock.now_ms()
+
+        def work(connection: sqlite3.Connection) -> bool:
+            if connection.execute(
+                "SELECT 1 FROM credential_bundles WHERE account_id=? AND state='EXPORT'",
+                (account_id,),
+            ).fetchone():
+                return False
             connection.execute(
                 "INSERT INTO credential_bundles VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     envelope.bundle_id,
                     envelope.account_id,
-                    state,
+                    "EXPORT",
                     envelope.envelope_version,
                     envelope.payload_schema_version,
                     envelope.key_id,
@@ -1435,10 +1389,199 @@ class ApplicationServices:
                     envelope.aad,
                     self.settings.codex_version,
                     now,
-                    now if state == "ACTIVE" else None,
+                    None,
                     None,
                 ),
             )
+            return True
+
+        return await self.database.transaction(work)
+
+    async def _await_critical(self, task: asyncio.Task[Any]) -> asyncio.CancelledError | None:
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        if task.cancelled():
+            raise asyncio.CancelledError
+        failure = task.exception()
+        if failure:
+            raise failure
+        return cancellation
+
+    async def _run_managed_locked(
+        self,
+        account: dict[str, Any],
+        call: Callable[[Any], Awaitable[T]],
+    ) -> T:
+        account_id = str(account["account_id"])
+        source = await self._credential_payload(account_id)
+        source_fingerprint = self.vault.auth_fingerprint(source)
+        runtime = await self.runtime.start_fresh(
+            account_id, source, account.get("workspace_constraint")
+        )
+        result: T | None = None
+        primary_error: BaseException | None = None
+        checkpoint_error: BaseException | None = None
+        async with runtime.lock:
+            try:
+                result = await call(runtime)
+            except BaseException as error:
+                primary_error = error
+
+            async def checkpoint() -> None:
+                await runtime.client.close()
+                captured = self.vault.capture(
+                    runtime.codex_home,
+                    self.settings.codex_version,
+                    account.get("workspace_constraint"),
+                )
+                if self.vault.auth_fingerprint(captured) != source_fingerprint:
+                    await self._promote_active_payload(account_id, captured)
+
+            checkpoint_task = asyncio.create_task(checkpoint())
+            try:
+                cancellation = await self._await_critical(checkpoint_task)
+                primary_error = primary_error or cancellation
+            except BaseException as error:
+                checkpoint_error = error
+
+        cleanup_task = asyncio.create_task(
+            self.runtime.preserve(runtime)
+            if checkpoint_error is not None
+            else self.runtime.discard(runtime)
+        )
+        try:
+            cancellation = await self._await_critical(cleanup_task)
+            primary_error = primary_error or cancellation
+        except BaseException as error:
+            checkpoint_error = checkpoint_error or error
+            preserve_task = asyncio.create_task(self.runtime.preserve(runtime))
+            try:
+                cancellation = await self._await_critical(preserve_task)
+                primary_error = primary_error or cancellation
+            except BaseException as ignored:
+                del ignored
+
+        if checkpoint_error is not None:
+            incident_task = asyncio.create_task(
+                self.open_incident(
+                    account_id,
+                    "credential_checkpoint",
+                    "ERROR",
+                    "Codex credential state could not be safely checkpointed",
+                )
+            )
+            try:
+                cancellation = await self._await_critical(incident_task)
+                primary_error = primary_error or cancellation
+            except BaseException as ignored:
+                del ignored
+            raise WindowkeeperError(
+                "CREDENTIAL_CHECKPOINT_FAILED",
+                "Codex credential state could not be safely checkpointed",
+                503,
+            ) from checkpoint_error
+        if primary_error is not None:
+            raise primary_error
+        return cast(T, result)
+
+    async def _run_managed(
+        self,
+        account: dict[str, Any],
+        call: Callable[[Any], Awaitable[T]],
+    ) -> T:
+        async with self._credential_lock(str(account["account_id"])):
+            return await self._run_managed_locked(account, call)
+
+    async def _issue_fork_candidate(
+        self,
+        account: dict[str, Any],
+        source: dict[str, Any],
+        source_identity: dict[str, Any],
+        state: str,
+        forbidden_fingerprints: set[str],
+    ) -> tuple[dict[str, Any], bool]:
+        runtime = await self.runtime.start_fresh(
+            account["account_id"], source, account.get("workspace_constraint")
+        )
+        try:
+            expected = dict(account)
+            expected["upstream_email"] = verify_identity(account, source_identity).get("email")
+            async with runtime.lock:
+                identity = await runtime.adapter.account(refresh_token=True)
+                verify_identity(expected, identity)
+                await runtime.client.close()
+                payload = self.vault.capture(
+                    runtime.codex_home,
+                    self.settings.codex_version,
+                    account.get("workspace_constraint"),
+                )
+            if self.vault.auth_fingerprint(payload) in forbidden_fingerprints:
+                raise WindowkeeperError(
+                    "CODEX_TOKEN_NOT_ROTATED",
+                    f"Codex did not create a separate {state.lower()} credential",
+                )
+            persist_task: asyncio.Task[Any]
+            if state == "ACTIVE":
+                persist_task = asyncio.create_task(
+                    self._promote_active_payload(account["account_id"], payload)
+                )
+            else:
+                persist_task = asyncio.create_task(
+                    self._install_export_payload(account["account_id"], payload)
+                )
+            cancellation = await self._await_critical(persist_task)
+            installed = True if state == "ACTIVE" else bool(persist_task.result())
+            discard_task = asyncio.create_task(self.runtime.discard(runtime))
+            discard_cancellation = await self._await_critical(discard_task)
+            cancellation = cancellation or discard_cancellation
+            if cancellation:
+                raise cancellation
+            return identity, installed
+        except BaseException as primary_error:
+            close_task = asyncio.create_task(runtime.client.close())
+            try:
+                await self._await_critical(close_task)
+            except BaseException as ignored:
+                del ignored
+            preserve_task = asyncio.create_task(self.runtime.preserve(runtime))
+            try:
+                await self._await_critical(preserve_task)
+            except BaseException as ignored:
+                del ignored
+            raise primary_error
+
+    async def _fork_credentials(
+        self,
+        account: dict[str, Any],
+        source: dict[str, Any],
+        source_identity: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool, str | None]:
+        source_fingerprint = self.vault.auth_fingerprint(source)
+        managed_identity, _ = await self._issue_fork_candidate(
+            account,
+            source,
+            source_identity,
+            "ACTIVE",
+            {source_fingerprint},
+        )
+        active = await self._credential_payload(account["account_id"])
+        if await self._bundle_payload(account["account_id"], "EXPORT"):
+            return managed_identity, True, None
+        try:
+            _, installed = await self._issue_fork_candidate(
+                account,
+                source,
+                source_identity,
+                "EXPORT",
+                {source_fingerprint, self.vault.auth_fingerprint(active)},
+            )
+            return managed_identity, installed, None
+        except Exception:
+            return managed_identity, False, "EXPORT_FORK_FAILED"
 
     async def export_auth_json(self, public: str) -> bytes:
         account = await self._account_row(public)
@@ -1492,83 +1635,89 @@ class ApplicationServices:
         await self._operation_state(
             operation_id, "RUNNING", "READING_USAGE", "Reading complete rate limits"
         )
-        now = self.clock.now_ms()
         try:
-            async with self._usage_semaphore, self._credential_lock(account["account_id"]):
-                source = await self._credential_payload(account["account_id"])
-                _, managed, exported = await self._fork_credentials(account, source)
-                raw = await self._read_usage(account["account_id"], managed)
-                await self._commit_usage(
-                    account,
-                    raw,
-                    operation_id,
-                    started,
-                    self.vault.encrypt(account["account_id"], managed),
-                    self.vault.encrypt(account["account_id"], exported),
+            async with self._usage_semaphore:
+                raw = await self._run_managed(
+                    account, lambda runtime: runtime.adapter.rate_limits()
                 )
+            await self._commit_usage(account, dict(raw), operation_id, started)
         except Exception as error:
-            duration = _integer((self.clock.monotonic() - started) * 1000)
-            snapshot_id = new_id()
-            summary = str(redact(str(error)))[:200]
-            auth_failure = False
-            if isinstance(error, WindowkeeperError):
-                auth_failure = error.code == "CODEX_AUTH_REQUIRED"
+            await self._record_usage_failure(account, operation_id, started, error)
 
-            def failed(connection: sqlite3.Connection) -> None:
-                connection.execute(
-                    "INSERT INTO usage_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        snapshot_id,
-                        account["account_id"],
-                        now,
-                        None,
-                        0,
-                        None,
-                        None,
-                        None,
-                        "USAGE_REFRESH_FAILED",
-                        summary,
-                        duration,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE usage_current SET last_attempt_at_ms=?,stale=1,last_error_code='USAGE_REFRESH_FAILED',last_error_summary=?,state_version=state_version+1 WHERE account_id=?",
-                    (now, summary, account["account_id"]),
-                )
-                if auth_failure:
-                    connection.execute(
-                        "UPDATE account_state SET auth_state='AUTH_REQUIRED',usage_state='STALE',activation_state='UNSCHEDULED',overall_state='ACTION_REQUIRED',last_error_code='CODEX_AUTH_REQUIRED',last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
-                        (summary, now, account["account_id"]),
-                    )
-                    connection.execute(
-                        "UPDATE activation_attempts SET state='CANCELLED',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
-                        (now, now, account["account_id"]),
-                    )
-                else:
-                    connection.execute(
-                        "UPDATE account_state SET usage_state='STALE',overall_state='WARNING',last_error_code='USAGE_REFRESH_FAILED',last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
-                        (summary, now, account["account_id"]),
-                    )
+    async def _record_usage_failure(
+        self,
+        account: dict[str, Any],
+        operation_id: str,
+        started: float,
+        error: Exception,
+    ) -> None:
+        now = self.clock.now_ms()
+        duration = _integer((self.clock.monotonic() - started) * 1000)
+        snapshot_id = new_id()
+        error_code = error.code if isinstance(error, WindowkeeperError) else "USAGE_REFRESH_FAILED"
+        summary = (
+            str(redact(error.detail))[:200]
+            if isinstance(error, WindowkeeperError)
+            else "Usage could not be refreshed"
+        )
+        auth_failure = error_code == "CODEX_AUTH_REQUIRED"
+        action_required = error_code in {"AUTH_IDENTITY_MISMATCH", "WORKSPACE_MISMATCH"}
+        checkpoint_failure = error_code == "CREDENTIAL_CHECKPOINT_FAILED"
 
-            await self.database.transaction(failed)
-            if auth_failure:
-                await self.runtime.stop(account["account_id"])
-                await self.open_incident(
+        def failed(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "INSERT INTO usage_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    snapshot_id,
                     account["account_id"],
-                    "authentication_failed",
-                    "ERROR",
-                    "Codex authentication must be renewed",
+                    now,
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    error_code,
+                    summary,
+                    duration,
+                ),
+            )
+            connection.execute(
+                "UPDATE usage_current SET last_attempt_at_ms=?,stale=1,last_error_code=?,last_error_summary=?,state_version=state_version+1 WHERE account_id=?",
+                (now, error_code, summary, account["account_id"]),
+            )
+            if auth_failure:
+                connection.execute(
+                    "UPDATE account_state SET auth_state='AUTH_REQUIRED',usage_state='STALE',activation_state='UNSCHEDULED',overall_state='ACTION_REQUIRED',last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                    (error_code, summary, now, account["account_id"]),
                 )
-            await self._fail_operation(
-                operation_id,
-                "CODEX_AUTH_REQUIRED" if auth_failure else "USAGE_REFRESH_FAILED",
-                "Codex authentication must be renewed"
-                if auth_failure
-                else "Usage could not be refreshed",
+            else:
+                overall = (
+                    "ERROR"
+                    if checkpoint_failure
+                    else ("ACTION_REQUIRED" if action_required else "WARNING")
+                )
+                connection.execute(
+                    "UPDATE account_state SET usage_state='STALE',overall_state=?,last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                    (overall, error_code, summary, now, account["account_id"]),
+                )
+            if auth_failure or action_required:
+                connection.execute(
+                    "UPDATE activation_attempts SET state='CANCELLED',completed_at_ms=?,updated_at_ms=?,state_version=state_version+1 WHERE account_id=? AND state='PLANNED'",
+                    (now, now, account["account_id"]),
+                )
+
+        await self.database.transaction(failed)
+        if auth_failure:
+            await self.open_incident(
+                account["account_id"],
+                "authentication_failed",
+                "ERROR",
+                "Codex authentication must be renewed",
             )
-            self.events.publish(
-                "account.updated", {"resource_id": account["public_token"], "state": "WARNING"}
-            )
+        await self._fail_operation(operation_id, error_code, summary)
+        self.events.publish(
+            "account.updated", {"resource_id": account["public_token"], "state": "WARNING"}
+        )
 
     async def _commit_usage(
         self,
@@ -1576,8 +1725,6 @@ class ApplicationServices:
         raw: dict[str, Any],
         operation_id: str,
         started: float,
-        managed: Envelope | None = None,
-        exported: Envelope | None = None,
     ) -> None:
         normalized = normalize_usage(raw)
         now = self.clock.now_ms()
@@ -1587,8 +1734,6 @@ class ApplicationServices:
         weekly = normalized.weekly
 
         def work(connection: sqlite3.Connection) -> None:
-            if managed and exported:
-                self._replace_bundle_rows(connection, managed, exported, now)
             connection.execute(
                 "INSERT INTO usage_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -1919,121 +2064,139 @@ class ApplicationServices:
     async def _run_activation(
         self, account: dict[str, Any], activation_id: str, operation_id: str
     ) -> None:
-        def eligible(connection: sqlite3.Connection) -> bool:
-            row = connection.execute(
-                "SELECT a.enabled,a.deleted_at_ms,s.auth_state,s.activation_state,aa.state,"
-                "u.short_used_percent_raw,u.weekly_used_percent_raw "
-                "FROM accounts a JOIN account_state s USING(account_id) "
-                "JOIN activation_attempts aa USING(account_id) "
-                "JOIN usage_current u USING(account_id) "
-                "WHERE a.account_id=? AND aa.activation_id=?",
-                (account["account_id"], activation_id),
-            ).fetchone()
-            return bool(
-                row
-                and row[0]
-                and row[1] is None
-                and row[2] == "VERIFIED"
-                and row[3] not in {"AMBIGUOUS", "SAFETY_BLOCKED"}
-                and row[4] in {"QUEUED", "THREAD_CREATED"}
-                and (row[5] is None or _integer(row[5]) < 100)
-                and (row[6] is None or _integer(row[6]) < 100)
-            )
-
         try:
             await self._operation_state(
                 operation_id, "RUNNING", "STARTING_RUNTIME", "Starting activation"
             )
-            if not await self.database.call(eligible):
+            if not await self.database.call(
+                lambda connection: self._activation_eligible(
+                    connection, account["account_id"], activation_id
+                )
+            ):
                 raise Conflict(
                     "ACTIVATION_NOT_ELIGIBLE", "Account became ineligible before activation"
                 )
-            async with self._activation_semaphore, self._credential_lock(account["account_id"]):
-                payload = await self._credential_payload(account["account_id"])
-                runtime = await self.runtime.use(account["account_id"], payload)
-                async with runtime.lock:
-                    model = await runtime.adapter.activation_model()
-                    thread_id = await runtime.adapter.create_thread(str(runtime.workspace), model)
-                    now = self.clock.now_ms()
-
-                    def thread_created(connection: sqlite3.Connection) -> None:
-                        connection.execute(
-                            "UPDATE activation_attempts SET state='THREAD_CREATED',upstream_thread_id=?,updated_at_ms=?,state_version=state_version+1 WHERE activation_id=?",
-                            (thread_id, now, activation_id),
-                        )
-                        connection.execute(
-                            "UPDATE operations SET result_json=? WHERE operation_id=?",
-                            (
-                                json.dumps(
-                                    {
-                                        "activation_id": activation_id,
-                                        "model": model.model,
-                                        "reasoning_effort": model.effort,
-                                        "service_tier": "default",
-                                        "pricing_verified_at": PRICING_VERIFIED_AT,
-                                    }
-                                ),
-                                operation_id,
-                            ),
-                        )
-                        connection.execute(
-                            "INSERT INTO activation_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (
-                                new_id(),
-                                activation_id,
-                                "SUBMIT",
-                                1,
-                                "STARTED",
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                thread_id,
-                                None,
-                                None,
-                                None,
-                                None,
-                                now,
-                                now,
-                            ),
-                        )
-
-                    await self.database.transaction(thread_created)
-                    if not await self.database.call(eligible):
-                        raise Conflict(
-                            "ACTIVATION_NOT_ELIGIBLE",
-                            "Account became ineligible before activation submission",
-                        )
-                    dispatch_started = self.clock.now_ms()
-
-                    def mark_dispatching(connection: sqlite3.Connection) -> None:
-                        connection.execute(
-                            "UPDATE activation_attempts SET state='TURN_DISPATCHING',updated_at_ms=?,state_version=state_version+1 WHERE activation_id=? AND state='THREAD_CREATED'",
-                            (dispatch_started, activation_id),
-                        )
-                        connection.execute(
-                            "UPDATE activation_operations SET state='REQUEST_WRITING',write_started_at_ms=?,updated_at_ms=? WHERE activation_id=? AND state='STARTED'",
-                            (dispatch_started, dispatch_started, activation_id),
-                        )
-
-                    await self.database.transaction(mark_dispatching)
-                    turn_id, _ = await runtime.adapter.start_turn(
-                        thread_id, activation_id, PROMPT, model
-                    )
-                    await self._accept_turn(activation_id, turn_id)
-                    result = await self._await_turn(runtime.adapter.client.notifications(), turn_id)
-                    await self._complete_activation(account, activation_id, operation_id, result)
-                self.runtime.release_later(account["account_id"])
-        except Exception as error:
+            async with self._activation_semaphore:
+                result = await self._run_managed(
+                    account,
+                    lambda runtime: self._perform_activation(
+                        runtime, account, activation_id, operation_id
+                    ),
+                )
+            await self._complete_activation(account, activation_id, operation_id, result)
+        except BaseException as error:
             await self._handle_activation_error(account, activation_id, operation_id, error)
+
+    def _activation_eligible(
+        self, connection: sqlite3.Connection, account_id: str, activation_id: str
+    ) -> bool:
+        row = connection.execute(
+            "SELECT a.enabled,a.deleted_at_ms,s.auth_state,s.activation_state,aa.state,"
+            "u.short_used_percent_raw,u.weekly_used_percent_raw "
+            "FROM accounts a JOIN account_state s USING(account_id) "
+            "JOIN activation_attempts aa USING(account_id) "
+            "JOIN usage_current u USING(account_id) "
+            "WHERE a.account_id=? AND aa.activation_id=?",
+            (account_id, activation_id),
+        ).fetchone()
+        return bool(
+            row
+            and row[0]
+            and row[1] is None
+            and row[2] == "VERIFIED"
+            and row[3] not in {"AMBIGUOUS", "SAFETY_BLOCKED"}
+            and row[4] in {"QUEUED", "THREAD_CREATED"}
+            and (row[5] is None or _integer(row[5]) < 100)
+            and (row[6] is None or _integer(row[6]) < 100)
+        )
+
+    async def _perform_activation(
+        self,
+        runtime: Any,
+        account: dict[str, Any],
+        activation_id: str,
+        operation_id: str,
+    ) -> str:
+        model = await runtime.adapter.activation_model()
+        thread_id = await runtime.adapter.create_thread(str(runtime.workspace), model)
+        now = self.clock.now_ms()
+
+        def thread_created(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "UPDATE activation_attempts SET state='THREAD_CREATED',upstream_thread_id=?,updated_at_ms=?,state_version=state_version+1 WHERE activation_id=?",
+                (thread_id, now, activation_id),
+            )
+            connection.execute(
+                "UPDATE operations SET result_json=? WHERE operation_id=?",
+                (
+                    json.dumps(
+                        {
+                            "activation_id": activation_id,
+                            "model": model.model,
+                            "reasoning_effort": model.effort,
+                            "service_tier": "default",
+                            "pricing_verified_at": PRICING_VERIFIED_AT,
+                        }
+                    ),
+                    operation_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO activation_operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    new_id(),
+                    activation_id,
+                    "SUBMIT",
+                    1,
+                    "STARTED",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    thread_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    now,
+                    now,
+                ),
+            )
+
+        await self.database.transaction(thread_created)
+        if not await self.database.call(
+            lambda connection: self._activation_eligible(
+                connection, account["account_id"], activation_id
+            )
+        ):
+            raise Conflict(
+                "ACTIVATION_NOT_ELIGIBLE",
+                "Account became ineligible before activation submission",
+            )
+        dispatch_started = self.clock.now_ms()
+
+        def mark_dispatching(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "UPDATE activation_attempts SET state='TURN_DISPATCHING',updated_at_ms=?,state_version=state_version+1 WHERE activation_id=? AND state='THREAD_CREATED'",
+                (dispatch_started, activation_id),
+            )
+            connection.execute(
+                "UPDATE activation_operations SET state='REQUEST_WRITING',write_started_at_ms=?,updated_at_ms=? WHERE activation_id=? AND state='STARTED'",
+                (dispatch_started, dispatch_started, activation_id),
+            )
+
+        await self.database.transaction(mark_dispatching)
+        turn_id, _ = await runtime.adapter.start_turn(thread_id, activation_id, PROMPT, model)
+        await self._accept_turn(activation_id, turn_id)
+        return await self._await_turn(runtime.adapter.client.notifications(), turn_id)
 
     async def _handle_activation_error(
         self,
         account: dict[str, Any],
         activation_id: str,
         operation_id: str,
-        error: Exception,
+        error: BaseException,
     ) -> None:
         not_eligible = (
             isinstance(error, WindowkeeperError) and error.code == "ACTIVATION_NOT_ELIGIBLE"
@@ -2073,7 +2236,6 @@ class ApplicationServices:
                 return True
 
             if await self.database.transaction(pause_if_exhausted):
-                await self.runtime.stop(account["account_id"])
                 return
         safety_blocked = False
         definitely_failed = False
@@ -2092,7 +2254,8 @@ class ApplicationServices:
             safety_blocked=safety_blocked,
             definitely_failed=definitely_failed,
         )
-        await self.runtime.stop(account["account_id"])
+        if isinstance(error, asyncio.CancelledError):
+            raise error
 
     async def _await_turn(self, notifications: Any, turn_id: str) -> str:
         text = ""
@@ -2562,33 +2725,40 @@ class ApplicationServices:
         attempt_id: str,
         method: LoginMethod,
         identity: dict[str, Any],
-        usage_raw: dict[str, Any],
-        envelope: Envelope,
-        export_envelope: Envelope,
+        export_available: bool,
+        export_error: str | None,
     ) -> None:
         now = self.clock.now_ms()
-        account_info = identity.get("account") or identity
+        account_info = verify_identity(account, identity)
         email = account_info.get("email")
         plan = account_info.get("planType")
 
         def work(connection: sqlite3.Connection) -> None:
-            self._replace_bundle_rows(connection, envelope, export_envelope, now)
+            changed = connection.execute(
+                "UPDATE login_attempts SET state='COMPLETED',observed_email=?,observed_plan_type=?,oauth_completed_at_ms=?,completed_at_ms=?,updated_at_ms=? WHERE login_attempt_id=? AND state='CHECKPOINTING_CREDENTIAL'",
+                (email, plan, now, now, now, attempt_id),
+            ).rowcount
+            if not changed:
+                raise Conflict("LOGIN_CANCELLED", "Sign-in did not own the credential checkpoint")
             connection.execute(
                 "UPDATE accounts SET enabled=1,lifecycle_state='ACTIVE',last_successful_login_method=?,updated_at_ms=? WHERE account_id=?",
                 (method.value, now, account["account_id"]),
             )
             connection.execute(
-                "UPDATE account_state SET auth_state='VERIFIED',worker_state='STOPPED',overall_state='WARNING',upstream_email=?,upstream_plan=?,last_auth_verified_at_ms=?,last_error_code=NULL,last_error_summary=NULL,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
+                "UPDATE account_state SET auth_state='VERIFIED',worker_state='STOPPED',overall_state='WARNING',upstream_email=COALESCE(?,upstream_email),upstream_plan=COALESCE(?,upstream_plan),last_auth_verified_at_ms=?,last_error_code=NULL,last_error_summary=NULL,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                 (email, plan, now, now, account["account_id"]),
             )
             connection.execute(
-                "UPDATE login_attempts SET state='COMPLETED',observed_email=?,observed_plan_type=?,oauth_completed_at_ms=?,completed_at_ms=?,updated_at_ms=? WHERE login_attempt_id=?",
-                (email, plan, now, now, now, attempt_id),
-            )
-            connection.execute(
-                "UPDATE operations SET state='SUCCEEDED',progress_code='COMPLETED',progress_summary=?,completed_at_ms=?,state_version=state_version+1 WHERE operation_id=?",
+                "UPDATE operations SET state='SUCCEEDED',progress_code=?,progress_summary=?,error_code=?,error_summary=?,completed_at_ms=?,state_version=state_version+1 WHERE operation_id=?",
                 (
-                    "One sign-in created managed and downloadable credentials",
+                    export_error or "COMPLETED",
+                    "Sign-in completed; export snapshot is unavailable"
+                    if export_error
+                    else "Sign-in completed and credentials were checkpointed",
+                    export_error,
+                    "The managed credential is safe; reauthenticate to retry export creation"
+                    if export_error
+                    else None,
                     now,
                     operation_id,
                 ),
@@ -2596,32 +2766,35 @@ class ApplicationServices:
 
         await self.database.transaction(work)
         await self.resolve_incident(account["account_id"], "authentication_failed")
-        await self._commit_usage(
-            account,
-            usage_raw,
-            await self._create_operation(account["account_id"], "usage.initial", "LOGIN"),
-            self.clock.monotonic(),
-        )
         self.events.publish(
             "login.updated",
             {
                 "attempt_id": attempt_id,
                 "account_id": account["public_token"],
                 "state": "COMPLETED",
-                "export_available": True,
+                "export_available": export_available,
             },
         )
 
-    async def _login_state(self, attempt_id: str, state: str) -> None:
+    async def _login_state(
+        self, attempt_id: str, state: str, *, expected: str | None = None
+    ) -> bool:
         now = self.clock.now_ms()
 
-        def work(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                "UPDATE login_attempts SET state=?,updated_at_ms=? WHERE login_attempt_id=?",
-                (state, now, attempt_id),
-            )
+        def work(connection: sqlite3.Connection) -> bool:
+            if expected is None:
+                changed = connection.execute(
+                    "UPDATE login_attempts SET state=?,updated_at_ms=? WHERE login_attempt_id=?",
+                    (state, now, attempt_id),
+                ).rowcount
+            else:
+                changed = connection.execute(
+                    "UPDATE login_attempts SET state=?,updated_at_ms=? WHERE login_attempt_id=? AND state=?",
+                    (state, now, attempt_id, expected),
+                ).rowcount
+            return bool(changed)
 
-        await self.database.transaction(work)
+        return await self.database.transaction(work)
 
     async def _activation_state(self, activation_id: str, state: str) -> None:
         now = self.clock.now_ms()
@@ -2673,7 +2846,8 @@ class ApplicationServices:
 
         def work(connection: sqlite3.Connection) -> str | None:
             row = connection.execute(
-                "SELECT account_id FROM login_attempts WHERE login_attempt_id=?", (attempt_id,)
+                "SELECT l.account_id,s.auth_state FROM login_attempts l JOIN account_state s USING(account_id) WHERE l.login_attempt_id=?",
+                (attempt_id,),
             ).fetchone()
             changed = connection.execute(
                 "UPDATE login_attempts SET state=?,error_code=?,error_summary=?,completed_at_ms=?,updated_at_ms=? WHERE login_attempt_id=? AND state NOT IN('COMPLETED','CANCELLED','EXPIRED','FAILED_RETRYABLE','FAILED_ACTION_REQUIRED','RESTART_REQUIRED','SUPERSEDED')",
@@ -2690,11 +2864,12 @@ class ApplicationServices:
                 "SELECT 1 FROM credential_bundles WHERE account_id=? AND state='ACTIVE'",
                 (account_id,),
             ).fetchone()
+            remains_verified = bool(has_active_credential and row[1] == "VERIFIED")
             connection.execute(
                 "UPDATE account_state SET auth_state=?,overall_state=?,last_error_code=?,last_error_summary=?,state_version=state_version+1,updated_at_ms=? WHERE account_id=?",
                 (
-                    "VERIFIED" if has_active_credential else "AUTH_REQUIRED",
-                    "WARNING" if has_active_credential else "ACTION_REQUIRED",
+                    "VERIFIED" if remains_verified else "AUTH_REQUIRED",
+                    "WARNING" if remains_verified else "ACTION_REQUIRED",
                     code,
                     safe_summary,
                     now,

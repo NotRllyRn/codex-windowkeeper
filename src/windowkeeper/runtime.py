@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 import shutil
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,6 @@ class AccountRuntime:
     client: AppServerClient
     adapter: CodexAdapter
     lock: asyncio.Lock
-    idle_task: asyncio.Task[None] | None = None
 
     @property
     def codex_home(self) -> Path:
@@ -32,20 +33,33 @@ class AccountRuntime:
 
 
 class RuntimeManager:
-    """Owns isolated account runtimes; callers only receive serialized adapters."""
+    """Owns one short-lived isolated Codex runtime per account operation."""
 
     def __init__(self, settings: Settings, vault: Vault | None = None) -> None:
         self.settings = settings
         self.vault = vault
         self._runtimes: dict[str, AccountRuntime] = {}
+        self._quarantined: dict[str, AccountRuntime] = {}
         self._manager_lock = asyncio.Lock()
         self._start_semaphore = asyncio.Semaphore(settings.process_start_concurrency)
 
     def _tree(self, account_id: str, generation: str) -> Path:
         return self.settings.runtime_dir / "accounts" / account_id / generation
 
+    def _write_config(self, codex_home: Path, workspace_constraint: str | None) -> None:
+        lines = ['cli_auth_credentials_store = "file"', 'web_search = "disabled"']
+        if workspace_constraint:
+            lines.append(f"forced_chatgpt_workspace_id = {json.dumps(workspace_constraint)}")
+        path = codex_home / "config.toml"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+
     def _prepare_tree(
-        self, account_id: str, generation: str, payload: dict[str, Any] | None
+        self,
+        account_id: str,
+        generation: str,
+        payload: dict[str, Any] | None,
+        workspace_constraint: str | None,
     ) -> Path:
         root = self._tree(account_id, generation)
         for child in ("home", "codex-home", "tmp", "workspace"):
@@ -56,22 +70,25 @@ class RuntimeManager:
             if not self.vault:
                 raise RuntimeError("vault is unavailable")
             self.vault.materialize(payload, root / "codex-home")
-        else:
-            (root / "codex-home" / "config.toml").write_text(
-                'cli_auth_credentials_store = "file"\nweb_search = "disabled"\n', encoding="utf-8"
-            )
-            os.chmod(root / "codex-home" / "config.toml", 0o600)
+        self._write_config(root / "codex-home", workspace_constraint)
         return root
 
-    async def start(self, account_id: str, payload: dict[str, Any] | None = None) -> AccountRuntime:
+    async def start_fresh(
+        self,
+        account_id: str,
+        payload: dict[str, Any] | None = None,
+        workspace_constraint: str | None = None,
+    ) -> AccountRuntime:
         async with self._manager_lock:
-            if active := self._runtimes.get(account_id):
-                if active.idle_task:
-                    active.idle_task.cancel()
-                    active.idle_task = None
-                return active
+            if account_id in self._runtimes or account_id in self._quarantined:
+                raise RuntimeError(f"runtime already exists for account {account_id}")
             generation = new_id()
-            root = self._prepare_tree(account_id, generation, payload)
+            root = self._tree(account_id, generation)
+            try:
+                root = self._prepare_tree(account_id, generation, payload, workspace_constraint)
+            except BaseException:
+                shutil.rmtree(root, ignore_errors=True)
+                raise
             environment = {
                 "PATH": "/usr/local/bin:/usr/bin:/bin",
                 "HOME": str(root / "home"),
@@ -98,45 +115,39 @@ class RuntimeManager:
             self._runtimes[account_id] = runtime
             return runtime
 
-    async def use(self, account_id: str, payload: dict[str, Any] | None = None) -> AccountRuntime:
-        runtime = await self.start(account_id, payload)
-        if runtime.idle_task:
-            runtime.idle_task.cancel()
-            runtime.idle_task = None
-        return runtime
+    async def get_existing(self, account_id: str) -> AccountRuntime | None:
+        async with self._manager_lock:
+            return self._runtimes.get(account_id)
 
-    def release_later(self, account_id: str) -> None:
-        runtime = self._runtimes.get(account_id)
-        if runtime and not runtime.idle_task:
-            runtime.idle_task = asyncio.create_task(self._idle_stop(account_id))
-
-    async def _idle_stop(self, account_id: str) -> None:
+    async def discard(self, runtime: AccountRuntime) -> None:
+        async with self._manager_lock:
+            if self._runtimes.get(runtime.account_id) is runtime:
+                self._runtimes.pop(runtime.account_id)
         try:
-            await asyncio.sleep(self.settings.codex_idle_seconds)
-            await self.stop(account_id)
-        except asyncio.CancelledError as cancellation:
-            del cancellation
-            return
+            shutil.rmtree(runtime.root)
+        except FileNotFoundError as missing:
+            del missing
+
+    async def preserve(self, runtime: AccountRuntime) -> None:
+        """Quarantine checkpoint evidence while retaining process ownership."""
+        with suppress(BaseException):
+            await runtime.client.close()
+        async with self._manager_lock:
+            if self._runtimes.get(runtime.account_id) is runtime:
+                self._runtimes.pop(runtime.account_id)
+            self._quarantined[runtime.account_id] = runtime
 
     async def stop(self, account_id: str) -> None:
-        async with self._manager_lock:
-            runtime = self._runtimes.get(account_id)
+        runtime = await self.get_existing(account_id)
         if not runtime:
             return
         async with runtime.lock:
-            async with self._manager_lock:
-                if self._runtimes.get(account_id) is not runtime:
-                    return
-                self._runtimes.pop(account_id)
-            if runtime.idle_task and runtime.idle_task is not asyncio.current_task():
-                runtime.idle_task.cancel()
             await runtime.client.close()
-            try:
-                shutil.rmtree(runtime.root)
-            except FileNotFoundError as missing:
-                del missing
-                return
+            await self.discard(runtime)
 
     async def close(self) -> None:
         for account_id in list(self._runtimes):
             await self.stop(account_id)
+        for runtime in list(self._quarantined.values()):
+            with suppress(BaseException):
+                await runtime.client.close()

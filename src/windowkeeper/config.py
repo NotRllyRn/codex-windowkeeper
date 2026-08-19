@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     auth_concurrency: int = Field(default=2, ge=1, le=8)
     activation_concurrency: int = Field(default=3, ge=1, le=8)
     process_start_concurrency: int = Field(default=2, ge=1, le=8)
-    codex_idle_seconds: int = Field(default=30, ge=0)
+    codex_idle_seconds: int = Field(default=30, ge=0)  # Deprecated; runtimes are always fresh.
     activation_safety_delay_seconds: int = Field(default=60, ge=1)
     activation_jitter_max_seconds: int = Field(default=30, ge=0, le=300)
     estimated_schedule_enabled: bool = True

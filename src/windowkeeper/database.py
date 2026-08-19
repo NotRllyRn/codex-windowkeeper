@@ -123,7 +123,7 @@ class Database:
                 if item is None:
                     break
                 job, future = item
-                if future.cancelled():
+                if not future.set_running_or_notify_cancel():
                     continue
                 try:
                     future.set_result(job(connection))

@@ -1,20 +1,48 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
 from windowkeeper.config import Settings
 from windowkeeper.database import Database
-from windowkeeper.vault import generate_key
+from windowkeeper.vault import Envelope, Vault, decode_key, generate_key
 from windowkeeper.web.app import create_app
 
 PASSWORD = "correct horse battery staple"  # noqa: S105
+
+
+def bundle_auth(settings: Settings, state: str) -> dict[str, Any]:
+    with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+        connection.row_factory = sqlite3.Row
+        instance = connection.execute(
+            "SELECT instance_uuid FROM instance_metadata WHERE singleton_id=1"
+        ).fetchone()[0]
+        row = connection.execute(
+            "SELECT * FROM credential_bundles WHERE state=?", (state,)
+        ).fetchone()
+    assert settings.vault_key and row
+    payload = Vault(decode_key(settings.vault_key), instance).decrypt(
+        Envelope(
+            row["bundle_id"],
+            row["account_id"],
+            row["key_id"],
+            row["nonce"],
+            row["ciphertext"],
+            row["aad"],
+            row["payload_schema_version"],
+            row["envelope_version"],
+        )
+    )
+    value = json.loads(Vault(decode_key(settings.vault_key), instance).auth_json(payload))
+    return cast(dict[str, Any], value)
 
 
 def wait_for(client: TestClient, text: str, path: str = "/", timeout: float = 8) -> str:
@@ -79,6 +107,16 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         dashboard = client.get("/api/internal/v1/dashboard").json()
         account = dashboard["data"][0]
         assert account["short_percent"] == 22
+        retired_manual = client.post(
+            f"/accounts/{account['public_token']}/reauthenticate",
+            data={
+                "login_method": "MANUAL_TOKENS",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        assert retired_manual.status_code == 409
+        assert retired_manual.json()["code"] == "LOGIN_METHOD_UNAVAILABLE"
         login_traces = list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
         refresh_traces = list((tmp_path / "run" / "accounts").glob("*/.fake-refreshes"))
         assert len(login_traces) == len(refresh_traces) == 1
@@ -123,6 +161,10 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         assert (
             json.loads(auth_export.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
         )
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            export_bundle_id = connection.execute(
+                "SELECT bundle_id FROM credential_bundles WHERE state='EXPORT'"
+            ).fetchone()[0]
         reauthenticated = client.post(
             f"/accounts/{account['public_token']}/reauthenticate",
             data={
@@ -136,7 +178,7 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         while len(login_traces[0].read_text(encoding="utf-8").splitlines()) < 2:
             assert time.monotonic() < deadline
             time.sleep(0.1)
-        while len(refresh_traces[0].read_text(encoding="utf-8").splitlines()) < 4:
+        while len(refresh_traces[0].read_text(encoding="utf-8").splitlines()) < 3:
             assert time.monotonic() < deadline
             time.sleep(0.1)
         rotated_export = client.post(
@@ -144,8 +186,15 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             data={"admin_password": PASSWORD, "csrf_token": csrf},
         )
         assert (
-            json.loads(rotated_export.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+            json.loads(rotated_export.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
         )
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert (
+                connection.execute(
+                    "SELECT bundle_id FROM credential_bundles WHERE state='EXPORT'"
+                ).fetchone()[0]
+                == export_bundle_id
+            )
         assert (
             client.post(
                 f"/accounts/{account['public_token']}/refresh",
@@ -165,8 +214,15 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             data={"admin_password": PASSWORD, "csrf_token": csrf},
         )
         assert (
-            json.loads(latest_export.content)["tokens"]["refresh_token"] == "fork-refresh-6"  # noqa: S105
+            json.loads(latest_export.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
         )
+        assert refresh_traces[0].read_text(encoding="utf-8").splitlines() == [
+            "refresh-1",
+            "refresh-2",
+            "refresh-3",
+        ]
+        model_rotation = executable.with_suffix(".rotate-on-model-list")
+        model_rotation.touch()
         activation = client.post(
             f"/accounts/{account['public_token']}/activate",
             data={"csrf_token": csrf},
@@ -174,6 +230,8 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         )
         assert activation.status_code == 303
         activation_html = wait_for(client, "Succeeded", activation.headers["location"])
+        model_rotation.unlink()
+        assert bundle_auth(settings, "ACTIVE")["checkpoint"] == "model-list"
         assert "gpt-5.4-mini" in activation_html
         assert "Minimal · Standard tier" in activation_html
         with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
@@ -195,7 +253,7 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
         )
         assert (
             json.loads(post_activation_export.content)["tokens"]["refresh_token"]
-            == "fork-refresh-6"  # noqa: S105
+            == "fork-refresh-2"  # noqa: S105
         )
         duplicate = client.post(
             f"/accounts/{account['public_token']}/activate",
@@ -203,6 +261,54 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
             follow_redirects=False,
         )
         assert duplicate.status_code == 409
+
+        rotate_error_marker = executable.with_suffix(".rotate-then-rate-error")
+        rotate_error_marker.touch()
+        try:
+            rotated_failure = client.post(
+                f"/accounts/{account['public_token']}/refresh",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            wait_for(client, "Failed", rotated_failure.headers["location"])
+            assert bundle_auth(settings, "ACTIVE")["checkpoint"] == "rate-limits"
+            assert bundle_auth(settings, "EXPORT")["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
+            with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+                assert (
+                    connection.execute("SELECT last_error_code FROM usage_current").fetchone()[0]
+                    == "CODEX_RPC_REJECTED"
+                )
+                assert (
+                    connection.execute(
+                        "SELECT count(*) FROM credential_bundles WHERE state='ACTIVE'"
+                    ).fetchone()[0]
+                    == 1
+                )
+                assert (
+                    connection.execute(
+                        "SELECT count(*) FROM credential_bundles WHERE state='RETIRED'"
+                    ).fetchone()[0]
+                    >= 1
+                )
+        finally:
+            rotate_error_marker.unlink(missing_ok=True)
+
+        transport_marker = executable.with_suffix(".transport-exit-on-rate-limits")
+        transport_marker.touch()
+        try:
+            transport_failure = client.post(
+                f"/accounts/{account['public_token']}/refresh",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            wait_for(client, "Failed", transport_failure.headers["location"])
+            with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+                assert (
+                    connection.execute("SELECT last_error_code FROM usage_current").fetchone()[0]
+                    == "CODEX_TRANSPORT_CLOSED"
+                )
+        finally:
+            transport_marker.unlink(missing_ok=True)
 
         auth_error_marker = executable.with_suffix(".auth-error")
         auth_error_marker.touch()
@@ -221,10 +327,132 @@ def test_enrollment_refresh_activation_and_five_layouts(tmp_path: Path) -> None:
                 data={"admin_password": PASSWORD, "csrf_token": csrf},
             )
             assert (
-                json.loads(retained_export.content)["tokens"]["refresh_token"] == "fork-refresh-6"  # noqa: S105
+                json.loads(retained_export.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
             )
         finally:
             auth_error_marker.unlink(missing_ok=True)
+
+        corrupt_marker = executable.with_suffix(".corrupt-on-rate-limits")
+        corrupt_marker.touch()
+        try:
+            checkpoint_failure = client.post(
+                f"/accounts/{account['public_token']}/refresh",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            wait_for(client, "Failed", checkpoint_failure.headers["location"])
+            with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+                assert (
+                    connection.execute("SELECT last_error_code FROM usage_current").fetchone()[0]
+                    == "CREDENTIAL_CHECKPOINT_FAILED"
+                )
+            assert list((tmp_path / "run" / "accounts").glob("*/*/codex-home/auth.json"))
+            assert "Credential Checkpoint" in client.get("/incidents").text
+        finally:
+            corrupt_marker.unlink(missing_ok=True)
+
+
+def test_managed_identity_mismatch_never_promotes_candidate(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "fake_codex.py"
+    executable = tmp_path / "fake_codex.py"
+    executable.write_bytes(source.read_bytes())
+    executable.chmod(0o700)
+    executable.with_suffix(".managed-email-mismatch").touch()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        client.post(
+            "/accounts",
+            data={
+                "display_name": "Mismatch",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": client.cookies["wk_csrf"],
+            },
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            accounts = client.get("/api/internal/v1/dashboard").json()["data"]
+            if accounts and accounts[0]["auth_state"] == "AUTH_REQUIRED":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("managed identity mismatch did not fail enrollment")
+        assert bundle_auth(settings, "ACTIVE")["tokens"]["refresh_token"] == "refresh-1"  # noqa: S105
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert not connection.execute(
+                "SELECT 1 FROM credential_bundles WHERE state='EXPORT'"
+            ).fetchone()
+
+
+def test_login_cancellation_cannot_promote_credentials(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "fake_codex.py"
+    executable = tmp_path / "fake_codex.py"
+    executable.write_bytes(source.read_bytes())
+    executable.chmod(0o700)
+    executable.with_suffix(".hold-login").touch()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        runtime_dir=tmp_path / "run",
+        vault_key=generate_key(),
+        admin_password=PASSWORD,
+        codex_executable=str(executable),
+        codex_idle_seconds=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        login = client.post("/login", data={"password": PASSWORD})
+        client.cookies.update(login.cookies)
+        csrf = client.cookies["wk_csrf"]
+        created = client.post(
+            "/accounts",
+            data={
+                "display_name": "Cancelled",
+                "login_method": "CHATGPT_DEVICE_CODE",
+                "admin_password": PASSWORD,
+                "csrf_token": csrf,
+            },
+        )
+        attempt_id = re.search(r'data-attempt="([^"]+)"', created.text).group(1)  # type: ignore[union-attr]
+        nonce = re.search(r'data-nonce="([^"]+)"', created.text).group(1)  # type: ignore[union-attr]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            interaction = client.get(
+                f"/api/internal/v1/login-attempts/{attempt_id}/interaction",
+                headers={"X-Interaction-Nonce": nonce},
+            )
+            if interaction.status_code == 200:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("login interaction did not become ready")
+        cancelled = client.post(
+            f"/api/internal/v1/login-attempts/{attempt_id}/cancel",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert cancelled.status_code == 202
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+                state = connection.execute(
+                    "SELECT state FROM login_attempts WHERE login_attempt_id=?", (attempt_id,)
+                ).fetchone()[0]
+                active = connection.execute(
+                    "SELECT 1 FROM credential_bundles WHERE state='ACTIVE'"
+                ).fetchone()
+            if state == "CANCELLED":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("login cancellation did not complete")
+        assert not active
 
 
 def test_manual_token_migration_recovers_v4_schema_drift(tmp_path: Path) -> None:
@@ -253,25 +481,12 @@ def test_manual_token_migration_recovers_v4_schema_drift(tmp_path: Path) -> None
         codex_idle_seconds=0,
     )
     with TestClient(create_app(settings)) as client:
-        login = client.post("/login", data={"password": PASSWORD})
-        client.cookies.update(login.cookies)
-        created = client.post(
-            "/accounts",
-            data={
-                "display_name": "Imported",
-                "login_method": "MANUAL_TOKENS",
-                "access_token": "source.access.jwt",
-                "refresh_token": "source-refresh-token",
-                "admin_password": PASSWORD,
-                "csrf_token": client.cookies["wk_csrf"],
-            },
-            follow_redirects=False,
-        )
-        assert created.status_code == 303
-        wait_for(client, "Succeeded", created.headers["location"])
+        assert client.get("/health/ready").status_code == 200
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
 
 
-def test_manual_tokens_use_the_normal_managed_credential_flow(tmp_path: Path) -> None:
+def test_manual_token_login_is_retired(tmp_path: Path) -> None:
     executable = Path(__file__).parents[1] / "fake_codex.py"
     os.chmod(executable, 0o700)
     settings = Settings(
@@ -282,77 +497,25 @@ def test_manual_tokens_use_the_normal_managed_credential_flow(tmp_path: Path) ->
         codex_executable=str(executable),
         codex_idle_seconds=0,
     )
-    access_token = "source.access.jwt"  # noqa: S105
-    refresh_token = "source-refresh-token"  # noqa: S105
     with TestClient(create_app(settings)) as client:
         login = client.post("/login", data={"password": PASSWORD})
         client.cookies.update(login.cookies)
         csrf = client.cookies["wk_csrf"]
+        assert "Paste tokens" not in client.get("/accounts/new").text
         rejected = client.post(
             "/accounts",
             data={
                 "display_name": "Rejected import",
                 "login_method": "MANUAL_TOKENS",
+                "access_token": "source.access.jwt",
+                "refresh_token": "source-refresh-token",
                 "admin_password": PASSWORD,
                 "csrf_token": csrf,
             },
         )
-        assert rejected.status_code == 422
+        assert rejected.status_code == 409
+        assert rejected.json()["code"] == "LOGIN_METHOD_UNAVAILABLE"
         assert client.get("/api/internal/v1/dashboard").json()["data"] == []
-        created = client.post(
-            "/accounts",
-            data={
-                "display_name": "Imported",
-                "login_method": "MANUAL_TOKENS",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "admin_password": PASSWORD,
-                "csrf_token": csrf,
-            },
-            follow_redirects=False,
-        )
-        assert created.status_code == 303
-        assert created.headers["location"].startswith("/operations/")
-        operation = wait_for(client, "Succeeded", created.headers["location"])
-        wait_for(client, "Imported")
-        account = client.get("/api/internal/v1/dashboard").json()["data"][0]
-        detail = client.get(f"/accounts/{account['public_token']}")
-        assert "MANUAL_TOKENS" in detail.text
-        assert access_token not in operation + detail.text
-        assert refresh_token not in client.get("/logs/export").text
-        assert not list((tmp_path / "run" / "accounts").glob("*/.fake-logins"))
-        traces = list((tmp_path / "run" / "accounts").glob("*/.fake-refreshes"))
-        assert len(traces) == 1
-        assert traces[0].read_text(encoding="utf-8").splitlines() == ["refresh-1", "refresh-2"]
-        exported = client.post(
-            f"/accounts/{account['public_token']}/auth-export",
-            data={"admin_password": PASSWORD, "csrf_token": csrf},
-        )
-        assert json.loads(exported.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
-        replaced = client.post(
-            f"/accounts/{account['public_token']}/reauthenticate",
-            data={
-                "login_method": "MANUAL_TOKENS",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "admin_password": PASSWORD,
-                "csrf_token": csrf,
-            },
-            follow_redirects=False,
-        )
-        assert replaced.status_code == 303
-        wait_for(client, "Succeeded", replaced.headers["location"])
-        assert traces[0].read_text(encoding="utf-8").splitlines() == [
-            "refresh-1",
-            "refresh-2",
-            "refresh-3",
-            "refresh-4",
-        ]
-        exported = client.post(
-            f"/accounts/{account['public_token']}/auth-export",
-            data={"admin_password": PASSWORD, "csrf_token": csrf},
-        )
-        assert json.loads(exported.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
 
 
 def test_latest_auth_export_survives_restart_and_activation(tmp_path: Path) -> None:
@@ -397,7 +560,7 @@ def test_latest_auth_export_survives_restart_and_activation(tmp_path: Path) -> N
         client.cookies.update(login.cookies)
         csrf = client.cookies["wk_csrf"]
         persisted = client.post(export_path, data={"admin_password": PASSWORD, "csrf_token": csrf})
-        assert json.loads(persisted.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+        assert json.loads(persisted.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
         activation = client.post(
             f"/accounts/{account['public_token']}/activate",
             data={"csrf_token": csrf},
@@ -405,7 +568,7 @@ def test_latest_auth_export_survives_restart_and_activation(tmp_path: Path) -> N
         )
         wait_for(client, "Succeeded", activation.headers["location"])
         rotated = client.post(export_path, data={"admin_password": PASSWORD, "csrf_token": csrf})
-        assert json.loads(rotated.content)["tokens"]["refresh_token"] == "fork-refresh-4"  # noqa: S105
+        assert json.loads(rotated.content)["tokens"]["refresh_token"] == "fork-refresh-2"  # noqa: S105
 
 
 def test_authentication_csrf_and_readiness_fail_closed(tmp_path: Path) -> None:

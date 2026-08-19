@@ -5,8 +5,8 @@
   <p class="kicker">New credential lineage</p>
   <h1>Add an authorized account</h1>
   <p>
-    One ChatGPT authorization creates a managed credential for Windowkeeper and
-    a separately refreshed <code>auth.json</code> for you to download.
+    One ChatGPT authorization creates a managed credential and, when none
+    exists, one externally owned <code>auth.json</code> export snapshot.
   </p>
 </section>
 {% if not vault_configured %}
@@ -41,7 +41,7 @@
     <label for="workspace">Workspace ID <span>optional</span></label
     ><input id="workspace" name="workspace" autocomplete="off" />
     <p class="field-help">
-      When supplied, sign-in fails closed if Codex reports another workspace.
+      When supplied, Windowkeeper configures Codex to restrict sign-in to this workspace.
     </p>
   </fieldset>
   <fieldset>
@@ -67,37 +67,7 @@
           callback URL back into Windowkeeper.</em
         ></span
       ></label
-    ><label class="method-option"
-      ><input type="radio" name="login_method" value="MANUAL_TOKENS" /><span
-        ><strong>Paste tokens</strong
-        ><em
-          >Import an existing ChatGPT access token and refresh token.</em
-        ></span
-      ></label
     >
-    <div data-token-fields hidden>
-      <label for="access_token">Access token</label
-      ><textarea
-        id="access_token"
-        name="access_token"
-        rows="3"
-        maxlength="65536"
-        autocomplete="off"
-        spellcheck="false"
-      ></textarea>
-      <label for="refresh_token">Refresh token</label
-      ><textarea
-        id="refresh_token"
-        name="refresh_token"
-        rows="3"
-        maxlength="65536"
-        autocomplete="off"
-        spellcheck="false"
-      ></textarea>
-      <p class="field-help">
-        Tokens are immediately refreshed and never stored in their pasted form.
-      </p>
-    </div>
   </fieldset>
   <fieldset>
     <legend>Administrator confirmation</legend>

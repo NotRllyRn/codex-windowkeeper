@@ -375,6 +375,12 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
         activation_id = connection.execute(
             "SELECT activation_id FROM activation_attempts ORDER BY created_at_ms DESC LIMIT 1"
         ).fetchone()[0]
+        active_before = connection.execute(
+            "SELECT bundle_id FROM credential_bundles WHERE state='ACTIVE'"
+        ).fetchone()[0]
+        export_before = connection.execute(
+            "SELECT bundle_id FROM credential_bundles WHERE state='EXPORT'"
+        ).fetchone()[0]
         connection.execute(
             "UPDATE activation_attempts SET state='TURN_ACCEPTED',normalized_result=NULL,terminal_status=NULL,completed_at_ms=NULL WHERE activation_id=?",
             (activation_id,),
@@ -389,6 +395,7 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
         )
         connection.commit()
     executable.with_suffix(".reconcile-ok").touch()
+    executable.with_suffix(".rotate-on-thread-read").touch()
     try:
         with TestClient(create_app(settings)) as client:
             login = client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
@@ -397,8 +404,22 @@ def test_startup_reconciles_a_completed_upstream_turn(tmp_path: Path) -> None:
             assert account["activation_state"] == "UNSCHEDULED"
             assert account["overall_state"] == "HEALTHY"
             assert "Activation Ambiguous" not in client.get("/incidents").text
+        with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
+            assert (
+                connection.execute(
+                    "SELECT bundle_id FROM credential_bundles WHERE state='ACTIVE'"
+                ).fetchone()[0]
+                != active_before
+            )
+            assert (
+                connection.execute(
+                    "SELECT bundle_id FROM credential_bundles WHERE state='EXPORT'"
+                ).fetchone()[0]
+                == export_before
+            )
     finally:
         executable.with_suffix(".reconcile-ok").unlink(missing_ok=True)
+        executable.with_suffix(".rotate-on-thread-read").unlink(missing_ok=True)
 
     with closing(sqlite3.connect(settings.data_dir / "windowkeeper.db")) as connection:
         connection.execute(

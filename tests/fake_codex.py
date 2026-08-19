@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ if "--version" in sys.argv:
     raise SystemExit(0)
 
 home = Path(os.environ["CODEX_HOME"])
+pending_login_id: str | None = None
 
 
 def send(value: dict[str, Any]) -> None:
@@ -22,6 +24,21 @@ def marker(suffix: str) -> bool:
         return Path(__file__).with_suffix(suffix).exists()
     except OSError:
         return False
+
+
+def mutate_auth(label: str) -> None:
+    auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+    auth["checkpoint"] = label
+    auth["tokens"]["access_token"] = f"{label}-access"
+    auth["tokens"]["refresh_token"] = f"{label}-refresh"
+    (home / "auth.json").write_text(json.dumps(auth, separators=(",", ":")), encoding="utf-8")
+
+
+def workspace_matches() -> bool:
+    config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    forced = config.get("forced_chatgpt_workspace_id")
+    observed = os.environ.get("FAKE_CODEX_WORKSPACE", "workspace-1")
+    return not forced or forced == observed
 
 
 for line in sys.stdin:
@@ -74,11 +91,25 @@ for line in sys.stdin:
                 },
             }
         )
-        send(
-            {"method": "account/login/completed", "params": {"loginId": login_id, "success": True}}
-        )
+        if marker(".hold-login"):
+            pending_login_id = login_id
+        else:
+            send(
+                {
+                    "method": "account/login/completed",
+                    "params": {"loginId": login_id, "success": workspace_matches()},
+                }
+            )
     elif method == "account/login/cancel":
         send({"id": request_id, "result": {}})
+        if pending_login_id:
+            send(
+                {
+                    "method": "account/login/completed",
+                    "params": {"loginId": pending_login_id, "success": False},
+                }
+            )
+            pending_login_id = None
     elif method == "account/read":
         if params.get("refreshToken"):
             trace = home.parents[1] / ".fake-refreshes"
@@ -96,21 +127,35 @@ for line in sys.stdin:
             (home / "auth.json").write_text(
                 json.dumps(auth, separators=(",", ":")), encoding="utf-8"
             )
+        account = None
+        if not marker(".account-none"):
+            account = {
+                "type": "chatgpt",
+                "email": (
+                    "other@example.test"
+                    if params.get("refreshToken") and marker(".managed-email-mismatch")
+                    else (None if marker(".account-email-null") else "owner@example.test")
+                ),
+                "planType": "pro",
+            }
         send(
             {
                 "id": request_id,
-                "result": {
-                    "account": {
-                        "email": "owner@example.test",
-                        "planType": "pro",
-                        "workspaceId": os.environ.get("FAKE_CODEX_WORKSPACE", "workspace-1"),
-                    }
-                },
+                "result": {"account": account, "requiresOpenaiAuth": account is None},
             }
         )
     elif method == "account/rateLimits/read":
+        if marker(".transport-exit-on-rate-limits"):
+            raise SystemExit(0)
+        if marker(".rotate-on-rate-limits") or marker(".rotate-then-rate-error"):
+            mutate_auth("rate-limits")
+        if marker(".corrupt-on-rate-limits"):
+            (home / "auth.json").write_text("not-json", encoding="utf-8")
+        if marker(".rotate-then-rate-error"):
+            send({"id": request_id, "error": {"code": -32000, "message": "temporary failure"}})
+            continue
         if marker(".auth-error"):
-            send({"id": request_id, "error": {"code": "unauthorized"}})
+            send({"id": request_id, "error": {"code": -32001, "message": "sign in again"}})
             continue
         send(
             {
@@ -138,6 +183,8 @@ for line in sys.stdin:
             }
         )
     elif method == "model/list":
+        if marker(".rotate-on-model-list"):
+            mutate_auth("model-list")
         send(
             {
                 "id": request_id,
@@ -208,6 +255,8 @@ for line in sys.stdin:
             }
         )
     elif method == "thread/read":
+        if marker(".rotate-on-thread-read"):
+            mutate_auth("thread-read")
         turns = []
         if marker(".reconcile-ok"):
             turns = [

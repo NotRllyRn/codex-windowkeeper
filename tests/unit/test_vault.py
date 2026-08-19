@@ -1,4 +1,5 @@
-import json
+import base64
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -17,31 +18,29 @@ def test_envelope_round_trip_and_account_binding() -> None:
     )
 
 
-def test_imported_tokens_create_a_minimal_refreshable_auth_file() -> None:
-    vault = Vault(decode_key(generate_key()), "instance")
-    payload = vault.imported_tokens("access.jwt.value", "refresh-value", "test")
-    auth = json.loads(vault.auth_json(payload))
-    assert auth == {
-        "tokens": {
-            "id_token": "access.jwt.value",
-            "access_token": "access.jwt.value",
-            "refresh_token": "refresh-value",
-            "account_id": None,
-        }
-    }
-    assert "last_refresh" not in auth
-
-
 def test_capture_and_materialize_reject_unsafe_paths(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "auth.json").write_text('{"token":"secret"}', encoding="utf-8")
+    (source / "config.toml").write_text('web_search = "enabled"\n', encoding="utf-8")
     vault = Vault(decode_key(generate_key()), "instance")
     payload = vault.capture(source, "test")
     assert vault.auth_json(payload) == b'{"token":"secret"}'
+    assert vault.auth_fingerprint(payload) == hashlib.sha256(b'{"token":"secret"}').hexdigest()
+    assert [item["relative_path"] for item in payload["files"]] == ["auth.json"]
+    legacy_config = b'web_search = "enabled"\n'
+    payload["files"].append(
+        {
+            "relative_path": "config.toml",
+            "mode": 0o600,
+            "sha256": hashlib.sha256(legacy_config).hexdigest(),
+            "content_base64": base64.b64encode(legacy_config).decode(),
+        }
+    )
     destination = tmp_path / "destination"
     vault.materialize(payload, destination)
     assert (destination / "auth.json").read_text() == '{"token":"secret"}'
+    assert not (destination / "config.toml").exists()
     payload["files"][0]["relative_path"] = "../auth.json"
     with pytest.raises(ValueError):
         vault.auth_json(payload)

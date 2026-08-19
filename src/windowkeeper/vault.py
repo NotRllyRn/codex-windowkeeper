@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from windowkeeper.ids import new_id
 
 PREFIX = "wk1_"
-ALLOWED_FILES = {"auth.json", "config.toml"}
+LEGACY_ALLOWED_FILES = {"auth.json", "config.toml"}
 
 
 def generate_key() -> str:
@@ -99,49 +99,21 @@ class Vault:
     def capture(
         self, codex_home: Path, codex_version: str, workspace: str | None = None
     ) -> dict[str, Any]:
-        files: list[dict[str, Any]] = []
-        for name in sorted(ALLOWED_FILES):
-            path = codex_home / name
-            if not path.exists():
-                continue
-            if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
-                raise ValueError(f"unsafe credential file: {name}")
-            content = path.read_bytes()
-            files.append(
-                {
-                    "relative_path": name,
-                    "mode": 0o600,
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                    "content_base64": base64.b64encode(content).decode(),
-                }
-            )
-        if not any(item["relative_path"] == "auth.json" for item in files):
-            raise ValueError("credential bundle has no auth.json")
-        return {
-            "schema_version": 1,
-            "codex_version": codex_version,
-            "files": files,
-            "workspace_constraint": workspace,
-        }
-
-    def imported_tokens(
-        self,
-        access_token: str,
-        refresh_token: str,
-        codex_version: str,
-        workspace: str | None = None,
-    ) -> dict[str, Any]:
-        content = json.dumps(
-            {
-                "tokens": {
-                    "id_token": access_token,
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "account_id": None,
-                }
-            },
-            separators=(",", ":"),
-        ).encode()
+        path = codex_home / "auth.json"
+        if (
+            not path.exists()
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 2 * 1024 * 1024
+        ):
+            raise ValueError("unsafe or missing credential file: auth.json")
+        content = path.read_bytes()
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError as error:
+            raise ValueError("auth.json is not valid JSON") from error
+        if not isinstance(value, dict):
+            raise ValueError("auth.json must contain an object")
         return {
             "schema_version": 1,
             "codex_version": codex_version,
@@ -170,6 +142,13 @@ class Vault:
             if not isinstance(value, dict):
                 raise ValueError("auth.json must contain an object")
             return content
+        raise ValueError("credential bundle has no auth.json")
+
+    def auth_fingerprint(self, payload: dict[str, Any]) -> str:
+        self.auth_json(payload)
+        for item in payload.get("files", []):
+            if item.get("relative_path") == "auth.json":
+                return str(item["sha256"])
         raise ValueError("credential bundle has no auth.json")
 
     def seal_text(self, scope: str, value: str) -> bytes:
@@ -206,12 +185,13 @@ class Vault:
         return text
 
     def materialize(self, payload: dict[str, Any], destination: Path) -> None:
+        self.auth_json(payload)
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(destination, 0o700)
         for item in payload.get("files", []):
             relative = PurePosixPath(item["relative_path"])
             if (
-                str(relative) not in ALLOWED_FILES
+                str(relative) not in LEGACY_ALLOWED_FILES
                 or relative.is_absolute()
                 or ".." in relative.parts
             ):
@@ -219,10 +199,17 @@ class Vault:
             content = base64.b64decode(item["content_base64"], validate=True)
             if hashlib.sha256(content).hexdigest() != item["sha256"]:
                 raise ValueError("credential payload digest mismatch")
-            path = destination / str(relative)
+            if str(relative) == "config.toml":
+                continue
+            path = destination / "auth.json"
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             try:
-                os.write(descriptor, content)
+                remaining = memoryview(content)
+                while remaining:
+                    written = os.write(descriptor, remaining)
+                    if written <= 0:
+                        raise OSError("credential file write did not progress")
+                    remaining = remaining[written:]
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)

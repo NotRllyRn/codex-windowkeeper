@@ -13,7 +13,6 @@ from windowkeeper.services import (
     browser_contract,
     validate_callback,
     verify_identity,
-    verify_same_identity,
 )
 
 
@@ -135,22 +134,6 @@ def test_activation_model_fails_closed_without_comparable_pricing() -> None:
         )
 
 
-def test_forked_credentials_must_match_the_managed_identity() -> None:
-    managed = {"account": {"email": "Owner@Example.test", "workspaceId": "workspace-1"}}
-    verify_same_identity(
-        managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-1"}}
-    )
-    with pytest.raises(WindowkeeperError) as caught:
-        verify_same_identity(
-            managed, {"account": {"email": "other@example.test", "workspaceId": "workspace-1"}}
-        )
-    assert caught.value.code == "AUTH_EXPORT_IDENTITY_MISMATCH"
-    with pytest.raises(WindowkeeperError):
-        verify_same_identity(
-            managed, {"account": {"email": "owner@example.test", "workspaceId": "workspace-2"}}
-        )
-
-
 def test_chatgpt_identity_accepts_nullable_email_but_rejects_mismatch() -> None:
     assert (
         verify_identity(
@@ -159,8 +142,6 @@ def test_chatgpt_identity_accepts_nullable_email_but_rejects_mismatch() -> None:
         )["planType"]
         == "pro"
     )
-    assert verify_identity({}, {"account": {"email": "legacy@example.test"}})["email"]
-    assert verify_identity({}, {"account": {"planType": "pro"}})["planType"] == "pro"
     assert (
         verify_identity(
             {"upstream_email": "owner@example.test"},
@@ -176,13 +157,21 @@ def test_chatgpt_identity_accepts_nullable_email_but_rejects_mismatch() -> None:
     assert reauthentication.value.code == "AUTH_IDENTITY_MISMATCH"
 
 
-def test_missing_codex_account_requires_authentication() -> None:
+@pytest.mark.parametrize("identity", ({}, {"account": None}))
+def test_missing_codex_account_requires_authentication(identity: dict[str, Any]) -> None:
     with pytest.raises(WindowkeeperError) as missing:
-        verify_identity({}, {"account": None})
+        verify_identity({}, identity)
     assert missing.value.code == "CODEX_AUTH_REQUIRED"
 
 
-@pytest.mark.parametrize("identity", ({"account": {}}, {"account": {"type": "apiKey"}}))
+@pytest.mark.parametrize(
+    "identity",
+    (
+        {"account": {}},
+        {"account": {"planType": "pro"}},
+        {"account": {"type": "apiKey"}},
+    ),
+)
 def test_identity_still_rejects_empty_or_non_chatgpt_account(identity: dict[str, Any]) -> None:
     with pytest.raises(WindowkeeperError) as unverifiable:
         verify_identity({}, identity)

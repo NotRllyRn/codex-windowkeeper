@@ -31,7 +31,6 @@ from windowkeeper.errors import WindowkeeperError
 from windowkeeper.events import Broadcaster
 from windowkeeper.logbook import LogBook, configure_logging
 from windowkeeper.runtime import RuntimeManager
-from windowkeeper.secret_types import Secret
 from windowkeeper.security import AdminSecurity, digest
 from windowkeeper.services import ApplicationServices
 from windowkeeper.singleton import SingletonLock
@@ -421,8 +420,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         labels: str = Form(""),
         workspace: str = Form(""),
         login_method: str = Form("CHATGPT_DEVICE_CODE"),
-        access_token: str = Form(""),
-        refresh_token: str = Form(""),
         admin_password: str = Form(),
         csrf_token: str = Form(),
     ) -> Response:
@@ -436,14 +433,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not current.compatibility.compatible:
             raise WindowkeeperError(current.compatibility.code, current.compatibility.detail, 503)
         method = LoginMethod(login_method)
-        if method == LoginMethod.MANUAL_TOKENS and (
-            not access_token.strip()
-            or not refresh_token.strip()
-            or len(access_token) > 65_536
-            or len(refresh_token) > 65_536
-        ):
+        if method == LoginMethod.MANUAL_TOKENS:
             raise WindowkeeperError(
-                "MANUAL_TOKENS_INVALID", "Enter an access token and refresh token", 422
+                "LOGIN_METHOD_UNAVAILABLE",
+                "Manual token import is retired; use device code or browser sign-in",
+                409,
             )
         account = await current.services.create_account(
             display_name,
@@ -451,11 +445,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             workspace=workspace.strip() or None,
             method=method,
         )
-        started = await current.services.start_login(
-            account["public_token"], method, token, Secret(access_token), Secret(refresh_token)
-        )
-        if method == LoginMethod.MANUAL_TOKENS:
-            return RedirectResponse(f"/operations/{started['operation_id']}", 303)
+        started = await current.services.start_login(account["public_token"], method, token)
         return _security_headers(
             render(
                 "login_progress.html",
@@ -523,8 +513,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         public: str,
         login_method: str = Form(),
-        access_token: str = Form(""),
-        refresh_token: str = Form(""),
         admin_password: str = Form(),
         csrf_token: str = Form(),
     ) -> Response:
@@ -539,11 +527,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise WindowkeeperError(current.compatibility.code, current.compatibility.detail, 503)
         account = (await current.services.account_detail(public))["account"]
         method = LoginMethod(login_method)
-        started = await current.services.start_login(
-            public, method, token, Secret(access_token), Secret(refresh_token)
-        )
         if method == LoginMethod.MANUAL_TOKENS:
-            return RedirectResponse(f"/operations/{started['operation_id']}", 303)
+            raise WindowkeeperError(
+                "LOGIN_METHOD_UNAVAILABLE",
+                "Manual token import is retired; use device code or browser sign-in",
+                409,
+            )
+        started = await current.services.start_login(public, method, token)
         return _security_headers(
             render(
                 "login_progress.html",
