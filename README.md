@@ -5,8 +5,9 @@ Windowkeeper is a single-instance supervisor for independently authenticated Cha
 ## What ships
 
 - Isolated runtime and encrypted managed credential lineage per account.
-- One-approval enrollment that refreshes the source twice into a managed credential and a downloadable `auth.json`.
-- Device-code sign-in (recommended), managed browser OAuth, and access/refresh-token import.
+- One-approval enrollment that creates a managed credential and one externally owned `auth.json` export snapshot.
+- Device-code sign-in (recommended) and managed browser OAuth.
+- Opaque `auth.json` checkpointing after every authenticated Codex runtime, including failed operations.
 - Immediate first-window activation, one in-flight activation per account, automatic short/weekly limit recovery, and reported-reset scheduling with a duration fallback when an idle reset moves forward on every poll.
 - Activation discovers account-available models and pins the cheapest officially priced text model at its lowest effort and standard service tier.
 - Five switchable dashboard compositions—Orbit, Ledger, Rail, Timeline, and Focus—in light and dark themes.
@@ -82,11 +83,11 @@ windowkeeper vault verify --key-file /secure/current.key
 
 Vault rotation is offline, all-or-nothing, and re-encrypts managed credentials, downloadable auth bundles, and webhook URLs/signing secrets before writing the new key file. Replace the configured key file atomically only after the command succeeds.
 
-The dashboard provides password-reauthenticated download of the latest `auth.json`, account enable/disable, one-approval reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Each successful refresh atomically replaces both the managed and downloadable credential branches. Activation records the selected model, reasoning effort, standard service tier, and pricing verification date in its durable operation result.
+The dashboard provides password-reauthenticated download of the enrollment `auth.json` snapshot, account enable/disable, one-approval reauthentication, typed-confirmation deletion, manual refresh/activation, operation history, incident state, webhook management, log filtering, and sanitized JSONL download. Normal operations advance only the managed credential and never replace the externally owned export. Activation records the selected model, reasoning effort, standard service tier, and pricing verification date in its durable operation result.
 
 ## Security boundary
 
-The vault key must not live in SQLite or the persistent data directory. Runtime credential files exist only under the runtime tmpfs and are removed when the account process stops. Manually pasted tokens are immediately refreshed and only the encrypted results are stored. URL query strings, callback values, device codes, tokens, authorization headers, and known token-shaped strings are redacted before logs, SSE, API responses, incidents, or webhooks.
+The vault key must not live in SQLite or the persistent data directory. Runtime credential files exist only under the runtime tmpfs and are removed after their credential state is safely checkpointed. A failed checkpoint quarantines the runtime instead of deleting potentially newer credentials. URL query strings, callback values, device codes, tokens, authorization headers, and known token-shaped strings are redacted before logs, SSE, API responses, incidents, or webhooks.
 
 Windowkeeper trusts its managed Codex child process with plaintext credentials while that isolated process is running. It does not protect against a compromised host, root user, or malicious Codex binary.
 

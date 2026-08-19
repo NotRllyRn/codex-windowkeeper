@@ -20,15 +20,16 @@ Windowkeeper is an evidence-driven, fail-closed activation supervisor. Unlike ac
 
 ## Operating Context
 
-The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll an account with one ChatGPT authorization, download the latest separately refreshed `auth.json`, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
+The service runs as one hardened Docker-first Python process on Linux amd64 or arm64. Operators enroll an account with one ChatGPT authorization, optionally download its externally owned enrollment `auth.json` snapshot, inspect short and weekly usage, manage schedules and incidents, run local administrative CLI commands, and receive durable webhook notifications.
 
 ## Capabilities and Constraints
 
 - Multiple independently authenticated accounts with overlapping labels.
 - The Codex app-server installed and managed by Windowkeeper is the only upstream integration seam.
-- Device-code login is recommended; browser login and manual access/refresh-token import are also supported.
+- Device-code login is recommended; managed browser login is also supported. New manual token import is retired.
 - SQLite is the durable store; one process owns one data directory.
-- One authorization is refreshed twice into managed and downloadable credential bundles; successful refreshes atomically replace both.
+- Each account has one mutable ACTIVE lineage and at most one immutable, externally owned EXPORT snapshot.
+- Every authenticated Codex runtime checkpoints opaque `auth.json` before deletion, including after RPC failure.
 - Credentials use AES-256-GCM envelopes and exist in plaintext only in private runtime directories or the authenticated export response.
 - One accepted activation at most for each account and window key; exhausted windows wait automatically, while genuinely ambiguous submissions block replay.
 - Activation uses the account's cheapest available model with verified standard-tier rates, its lowest advertised reasoning effort, and no premium speed tier.

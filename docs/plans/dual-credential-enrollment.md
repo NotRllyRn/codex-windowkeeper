@@ -1,53 +1,29 @@
-# One-login dual-credential plan
+# One-login managed credential and export snapshot
+
+## Status
+
+Superseded by [managed credential checkpointing](managed-credential-checkpointing.md).
 
 ## Outcome
 
-The operator approves ChatGPT sign-in once. Windowkeeper immediately uses the resulting source refresh token twice within OpenAI's reuse grace period to create:
+One OAuth enrollment can issue:
 
-1. an encrypted managed credential bundle;
-2. an encrypted downloadable credential bundle.
+1. one mutable `ACTIVE` credential owned by Windowkeeper;
+2. at most one immutable `EXPORT` snapshot owned by an external service.
 
-Every successful usage refresh repeats that two-way fork from the current managed bundle. Both replacements commit atomically, so the download always tracks the newest successful refresh and failures retain both prior bundles.
+The fork is attempted only when an account has no export. Windowkeeper persists the managed result before attempting export issuance, so an export failure cannot roll back or destroy the valid managed credential.
 
-## Minimal design
+## Normal operation
 
-- Add `refresh_token=True` to the existing Codex `account/read` adapter seam.
-- Materialize the same source payload into two fresh, sequential isolated runtimes.
-- Force one Codex-managed refresh in each runtime and capture each resulting `auth.json`.
-- Verify that both refresh tokens rotated and both identities match.
-- Replace `ACTIVE` and `EXPORT` in one SQLite transaction.
-- Use the new managed payload for the current usage read and future activation.
-- Keep the existing authenticated, CSRF-protected, password-confirmed download route.
+Usage refresh, activation, and reconciliation use only `ACTIVE`. Codex owns normal refresh timing. After every authenticated runtime, Windowkeeper quiesces Codex, captures opaque `auth.json`, atomically advances `ACTIVE` when it changed, and only then removes plaintext.
 
-No direct OAuth HTTP client, token parser domain model, refresh queue, or additional scheduler is introduced.
+An existing `EXPORT` is never materialized, refreshed, replaced, or used by Windowkeeper. It is not guaranteed to remain independently renewable after `ACTIVE` rotates. Operators must not copy one export into multiple independently refreshing services.
 
-## Enrollment
+## Failure invariants
 
-1. Complete one browser or device-code sign-in.
-2. Capture the source credential only in memory.
-3. Fork it through two forced refreshes.
-4. Commit the managed and downloadable outputs together.
-5. Discard the source and temporary runtime homes.
-
-Reauthentication follows the same one-sign-in process and replaces both outputs.
-
-## Refresh
-
-1. Decrypt the current managed bundle.
-2. Fork it through two forced refreshes.
-3. Read usage with the new managed runtime.
-4. Atomically replace both bundles and commit usage.
-5. Later activation materializes only the managed bundle.
-
-The downloadable bundle is never materialized for ordinary use and is never used as a future refresh source.
-
-## Failure and security invariants
-
-- A refresh operation never partially promotes one output.
-- Both outputs must have refresh tokens distinct from the source and from each other.
-- Both outputs must match the enrolled email and workspace.
-- Token contents never enter logs, URLs, events, or view models.
-- Download responses remain non-cacheable attachments behind session, CSRF, and administrator reauthentication.
-- Replacing the local export does not revoke copies downloaded earlier.
-- Both lineages share the same upstream account and quota.
-- If OpenAI removes refresh-token reuse, Windowkeeper fails closed and keeps the last good bundles.
+- A changed managed credential is checkpointed even when the requested RPC fails.
+- Old `ACTIVE` becomes `RETIRED` only in the transaction that inserts its replacement.
+- Export failure leaves the managed account usable and reports `EXPORT_FORK_FAILED`.
+- Checkpoint failure prevents semantic success and quarantines the runtime evidence.
+- Download responses remain non-cacheable and require session, CSRF, and administrator reauthentication.
+- Protected live-account evidence remains required because upstream does not guarantee independent refresh-token forks.

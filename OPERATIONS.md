@@ -16,15 +16,15 @@ Set a 15+ character `WINDOWKEEPER_ADMIN_PASSWORD` in `.env`. Windowkeeper loads 
 
 ## Account sign-in
 
-Device code is recommended for local, NAS, Docker, and SSH deployments. Existing access and refresh tokens may instead be pasted through the authenticated UI; no timestamp is required, and only the immediately refreshed encrypted outputs are stored. Browser OAuth supports three modes:
+Device code is recommended for local, NAS, Docker, and SSH deployments. Manual access/refresh-token import is retired because it depends on Codex's private credential schema. Browser OAuth supports three modes:
 
 - `manual`: display the validated authorization URL and paste the resulting localhost callback URL into the authenticated UI.
 - `host-loopback`: receive the validated localhost callback directly; only use on a Linux host where Windowkeeper owns the pinned callback ports.
 - `disabled`: prohibit browser OAuth while retaining device-code sign-in.
 
-Enrollment and reauthentication require one ChatGPT approval. Windowkeeper immediately asks the pinned Codex app-server to refresh that source credential twice: one result becomes the managed bundle and the other becomes the latest downloadable `auth.json`. Every successful usage refresh repeats this two-way refresh and atomically replaces both local bundles; activation uses the resulting managed bundle.
+Enrollment requires one ChatGPT approval. Windowkeeper first makes the OAuth credential durable, then uses two isolated Codex refreshes to issue the managed credential and, when none exists, one downloadable export snapshot. The managed result is persisted before export issuance is attempted, so export failure cannot roll it back. Reauthentication advances only the managed credential and leaves an existing export unchanged.
 
-This relies on OpenAI's limited refresh-token reuse grace period. Windowkeeper validates that both outputs rotated and match the same account/workspace. If either exchange fails, neither stored bundle is replaced. Replacing the local download does not remotely revoke copies downloaded earlier.
+Normal usage, activation, and reconciliation never proactively refresh or use the export. Codex owns normal managed-token refresh timing; Windowkeeper quiesces every authenticated runtime and checkpoints its opaque `auth.json` before deletion, even when the requested RPC fails. A checkpoint failure quarantines the runtime and opens an incident. The export is externally owned, is not kept current, is not remotely revoked, and has no guarantee of independent renewability after the managed lineage rotates. Never copy one export into multiple independently refreshing services.
 
 Windowkeeper activates immediately when an authenticated account reports 0% usage and has no proven activation, then permits only one in-flight activation for that account. It cancels pending activation plans while either the short or weekly window is exhausted and resumes planning automatically after a later usage poll proves capacity is available. A stable upstream reset schedules the next activation just after reset. If an idle upstream reset instead advances by five hours on every poll, Windowkeeper schedules from the last proven activation plus the observed window duration. A definite upstream rejection never becomes a review block; only an outcome that cannot be proven still requires acknowledgment. Reviewing a genuinely ambiguous activation cancels obsolete pending plans before replanning.
 
@@ -78,9 +78,10 @@ destinations that no longer require this metadata.
 1. Stop automatic activity by disabling the affected account.
 2. Read the incident, operation history, and sanitized logs; retain IDs, timestamps, and error codes only.
 3. For `authentication_failed`, reauthenticate and verify the same upstream account/workspace.
-4. For `activation_ambiguous` or `activation_safety`, inspect upstream thread/turn evidence. Windowkeeper never retries that window. Use **Acknowledge without retry** only after review; this permits future windows, not the ambiguous one.
-5. For Codex startup failures, rebuild the image and inspect `windowkeeper doctor` before restarting.
-6. For suspected key or host compromise, stop the service, preserve encrypted evidence, rotate credentials outside Windowkeeper, rotate the vault key, and revoke administrator sessions by resetting the password.
+4. For `credential_checkpoint`, stop activity and preserve the quarantined runtime tree; it may contain newer credentials than SQLite.
+5. For `activation_ambiguous` or `activation_safety`, inspect upstream thread/turn evidence. Windowkeeper never retries that window. Use **Acknowledge without retry** only after review; this permits future windows, not the ambiguous one.
+6. For Codex startup failures, rebuild the image and inspect `windowkeeper doctor` before restarting.
+7. For suspected key or host compromise, stop the service, preserve encrypted evidence, rotate credentials outside Windowkeeper, rotate the vault key, and revoke administrator sessions by resetting the password.
 
 Never attach credential files, callback URLs, device codes, vault keys, passwords, SQLite databases, runtime trees, or unsanitized logs to an issue.
 

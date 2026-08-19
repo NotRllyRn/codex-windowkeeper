@@ -10,20 +10,22 @@ administrator passwords, SQLite files, raw runtime directories, or unsanitized
 logs.
 
 Windowkeeper does not enforce browser request origins; operators must restrict
-network access themselves. CSRF tokens remain enforced. Downloading the latest
+network access themselves. CSRF tokens remain enforced. Downloading the export
 `auth.json` requires an authenticated session, CSRF validation, administrator
-password reauthentication, and returns a non-cacheable attachment. Manually
-pasted source tokens remain in memory only until Codex refreshes them and are
-never stored directly. Refresh replaces the local downloadable bundle but does
-not revoke files downloaded earlier.
+password reauthentication, and returns a non-cacheable attachment. New manual
+token import is retired. Normal operations never use or replace the export, and
+Windowkeeper cannot revoke downloaded files or guarantee that an export remains
+independently renewable after the managed credential rotates.
 
 Webhook notifications are redacted before durable storage and never contain
 credentials. They do contain operational account metadata, including display
 name and authenticated email, to identify affected accounts. Configure only
 trusted HTTPS destinations.
 
-Treat downloaded credential files like passwords and move them directly into
-protected credential storage. Windowkeeper's security boundary assumes a
-trusted host and the Codex executable managed by its release image. A
+Treat downloaded credential files like passwords, move them directly into
+protected credential storage, and do not give the same rotating export to
+multiple independent writers. Windowkeeper's security boundary assumes a
+trusted host and the Codex executable managed by its release image. A failed
+checkpoint deliberately leaves quarantined plaintext evidence for recovery. A
 compromised host, root user, or malicious child binary is outside that
 boundary.
