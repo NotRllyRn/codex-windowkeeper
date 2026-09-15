@@ -1,6 +1,6 @@
 # Archived
 
-In favor of [https://github.com/NotRllyRn/codex-broker](Codex Broker)
+In favor of [Codex Broker](https://github.com/NotRllyRn/codex-broker)
 
 # Codex Windowkeeper
 
