@@ -1,3 +1,7 @@
+# Archived
+
+In favor of [https://github.com/NotRllyRn/codex-broker](Codex Broker)
+
 # Codex Windowkeeper
 
 Windowkeeper is a single-instance supervisor for independently authenticated ChatGPT/Codex accounts. It reads authoritative short and weekly usage windows from the managed Codex app-server, waits while either limit is exhausted, schedules one evidence-backed activation when usage returns, and makes genuinely ambiguous submissions visible instead of retrying blindly.
